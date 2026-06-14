@@ -1,0 +1,52 @@
+[project]
+name = "newton-cabling"
+version = "0.1.0"
+description = "Reusable building blocks for robotic datacenter-cabling simulation on the Newton physics engine"
+requires-python = ">=3.10"
+dependencies = ["numpy"]
+
+[project.optional-dependencies]
+# Needed only to run the record_*.py demos (a CUDA GPU is required). The
+# pure-logic modules (timeline, report, connector specs, cable) deliberately do
+# NOT import newton, so they lint, type-check, and test on any machine.
+#
+# The demos use APIs from Newton's main branch (the released PyPI build lags), so
+# this installs Newton from git. Pin to a specific commit for reproducibility.
+sim = [
+    "newton[examples] @ git+https://github.com/newton-physics/newton",
+    "rerun-sdk",
+]
+
+[dependency-groups]
+dev = ["ruff", "ty", "pytest"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["newton_cabling"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+# The top-level record_*.py and diagnostics/ are GPU-only runner scripts: they
+# import newton/warp (unavailable off-GPU), use Warp's annotation-as-call kernel
+# idiom, and are verified by execution on the GPU box, not by static analysis.
+# The reusable, importable package under newton_cabling/ is held to the full gate.
+extend-exclude = ["record_*.py", "diagnostics"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM", "RUF"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+# Local quality gate (no GPU required):
+#   uv run ruff format . && uv run ruff check .
+#   uv run ty check newton_cabling/__init__.py newton_cabling/timeline.py \
+#       newton_cabling/report.py newton_cabling/connector.py tests
+#   uv run pytest
+# newton_cabling/sim/* is linted but excluded from `ty` (Warp kernel signatures
+# use wp.array(dtype=...) calls in annotation position, which standard type
+# checkers reject) and is verified by execution on a GPU box.

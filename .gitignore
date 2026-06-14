@@ -1,0 +1,17 @@
+run.log
+.DS_Store
+*.pyc
+__pycache__/
+.venv/
+.venv-head/
+.ruff_cache/
+.pytest_cache/
+*.egg-info/
+dist/
+uv.lock
+
+# Recordings (large, regenerable by the record_*.py scripts)
+*.rrd
+*.rbl
+*.json
+!pyproject.toml

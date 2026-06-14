@@ -1,0 +1,21 @@
+newton-cabling
+Copyright 2026 Hebbian Robotics
+
+This product is licensed under the Apache License, Version 2.0.
+
+It adapts patterns and small helper code from the Newton physics engine
+(https://github.com/newton-physics/newton), Copyright (c) The Newton Developers,
+licensed under the Apache License, Version 2.0. In particular:
+
+  - The runner scripts import and reuse helpers from Newton's
+    `example_contacts_rj45_plug` (e.g. `_load_mesh`, `_sync_cable_anchors`) and
+    the connector/latch rig it defines.
+  - The grasp force-spring kernel is ported from the same example's gizmo spring.
+  - The arm setup and grasp approach follow Newton's `example_robot_panda_hydro`
+    and `example_cloth_franka`.
+
+Newton is built on NVIDIA Warp (https://github.com/NVIDIA/warp), also Apache-2.0.
+
+Robot and connector assets (the Franka Emika Panda URDF and the RJ45 plug mesh)
+are downloaded at runtime from Newton's asset registry and are NOT redistributed
+in this repository.

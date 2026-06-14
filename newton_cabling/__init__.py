@@ -1,0 +1,61 @@
+"""Reusable building blocks for cabling simulation on the Newton physics engine.
+
+The pure-logic surface (timeline, report, connector specs) imports no GPU code
+and is safe to use anywhere. The Newton-backed scene builder, grasp spring, and
+recording helpers live behind the ``sim`` optional dependency and are imported
+lazily by the runner scripts.
+"""
+
+from newton_cabling.cable import route_cable_from_boot
+from newton_cabling.connector import (
+    ConnectorSpec,
+    ContactSpec,
+    LatchSpec,
+    rj45_connector,
+)
+from newton_cabling.report import (
+    CycleMeasurements,
+    CycleMetrics,
+    CycleOutcome,
+    CycleSucceeded,
+    CycleThresholds,
+    ExtractionIncomplete,
+    InsertionFailed,
+    LatchSlipped,
+    evaluate_cycle,
+    outcome_from_dict,
+    outcome_to_dict,
+)
+from newton_cabling.timeline import (
+    CableTimeline,
+    GraspState,
+    LatchState,
+    Phase,
+    TimelineSample,
+    proven_cycle_timeline,
+)
+
+__all__ = [
+    "CableTimeline",
+    "ConnectorSpec",
+    "ContactSpec",
+    "CycleMeasurements",
+    "CycleMetrics",
+    "CycleOutcome",
+    "CycleSucceeded",
+    "CycleThresholds",
+    "ExtractionIncomplete",
+    "GraspState",
+    "InsertionFailed",
+    "LatchSlipped",
+    "LatchSpec",
+    "LatchState",
+    "Phase",
+    "TimelineSample",
+    "evaluate_cycle",
+    "outcome_from_dict",
+    "outcome_to_dict",
+    "proven_cycle_timeline",
+    "rj45_connector",
+    "route_cable_from_boot",
+]
