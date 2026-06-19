@@ -13,6 +13,7 @@ limits. Contact uses an SDF ShapeConfig built from the spec.
 from __future__ import annotations
 
 import dataclasses
+import os
 
 import newton
 import newton.examples
@@ -22,6 +23,25 @@ import warp as wp
 from pxr import Usd
 
 from newton_cabling.connector import ConnectorSpec
+
+# Repo-local asset dir for assets we author (e.g. the CAD-derived cad_rj45.usd),
+# checked before falling back to Newton's bundled example assets.
+_REPO_ASSETS = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "assets")
+
+
+def resolve_asset_path(name: str) -> str:
+    """Locate a connector USD: absolute path, then repo assets, then Newton's bundle.
+
+    Keeps the bundled ``rj45_plug.usd`` working (it isn't in the repo, so it falls
+    through to ``newton.examples.get_asset``) while letting our own assets ship in
+    ``newton_cabling/assets/``.
+    """
+    if os.path.isabs(name) and os.path.exists(name):
+        return name
+    local = os.path.join(_REPO_ASSETS, name)
+    if os.path.exists(local):
+        return local
+    return newton.examples.get_asset(name)
 
 Vector3 = tuple[float, float, float]
 
@@ -94,7 +114,7 @@ def _load_mesh(stage: Usd.Stage, prim_path: str, gap: float, sdf_resolution: int
 
 def load_connector_meshes(spec: ConnectorSpec) -> ConnectorMeshes:
     """Load the socket/plug/latch meshes named in the spec and build their SDFs."""
-    usd_path = newton.examples.get_asset(spec.usd_asset_name)
+    usd_path = resolve_asset_path(spec.usd_asset_name)
     stage = Usd.Stage.Open(usd_path)
     gap = spec.contact.gap_meters
     resolution = spec.contact.sdf_max_resolution
@@ -127,6 +147,9 @@ def add_connector_rig(
     plug_pos: np.ndarray,
     latch_pos: np.ndarray,
     plug_anchor_pos: np.ndarray,
+    lock_rotation: bool = True,
+    angular_ke: float = 0.0,
+    angular_kd: float = 0.0,
 ) -> ConnectorRig:
     """Add the socket/plug/latch bodies, shapes, and joints to ``builder``.
 
@@ -153,6 +176,19 @@ def add_connector_rig(
     latch_shape = builder.add_shape_mesh(latch_body, mesh=meshes.latch.mesh, cfg=cfg)
 
     joint_dof = newton.ModelBuilder.JointDofConfig
+    # lock_rotation=True (default, used by the demos) gives a translation-only plug:
+    # angular_axes=None locks rotation. lock_rotation=False adds 3 free angular axes for
+    # a 6-DOF plug (driven by an external torque spring) — used by the RL 6-DOF env.
+    angular_axes = None
+    if not lock_rotation:
+        # Driven angular axes (PD toward control.joint_target_q). Per the README, a d6
+        # angular DRIVE can hold/move the child's orientation; a FREE angular axis
+        # (ke=kd=0) is VBD-unstable (tumbles). Pass angular_ke>0 to drive it.
+        angular_axes = (
+            joint_dof(axis=(1.0, 0.0, 0.0), target_ke=angular_ke, target_kd=angular_kd),
+            joint_dof(axis=(0.0, 1.0, 0.0), target_ke=angular_ke, target_kd=angular_kd),
+            joint_dof(axis=(0.0, 0.0, 1.0), target_ke=angular_ke, target_kd=angular_kd),
+        )
     world_d6 = builder.add_joint_d6(
         parent=-1,
         child=plug_body,
@@ -161,7 +197,7 @@ def add_connector_rig(
             joint_dof(axis=(0.0, 1.0, 0.0)),
             joint_dof(axis=(0.0, 0.0, 1.0)),
         ),
-        angular_axes=None,
+        angular_axes=angular_axes,
         parent_xform=wp.transform(wp.vec3(*plug_anchor_pos), wp.quat_identity()),
         child_xform=wp.transform_identity(),
         custom_attributes={"vbd:joint_is_hard": 0},

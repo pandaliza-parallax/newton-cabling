@@ -164,3 +164,61 @@ def rj45_connector() -> ConnectorSpec:
         cable_kinematic_prefix=4,
         cable_friction=2.0,
     )
+
+
+def cad_rj45_connector(gap_meters: float = 0.00005, sdf_max_resolution: int = 512) -> ConnectorSpec:
+    """Real-CAD RJ45 connector from the gs-sim-vla meshes (McMaster 9953K216 plug,
+    1422N17 panel jack), as a Newton-ready merged USD built by
+    ``tools/cad_assets/build_cad_rj45_usd.py`` from the real STEP tessellation.
+
+    Same prim layout as :func:`rj45_connector` (/World/Socket,/Plug,/Latch) so the rig +
+    RL env load it unchanged. /World/Plug is the real molded plug cleaned to its outer
+    shell (internal contact pins/debris dropped); /World/Latch is the real latch tab split
+    off it, a separate body on a revolute hinge. /World/Socket is the carved bore (the
+    1422N17 contact block carved out so the full-size plug seats), a snug stepped cavity
+    (body pocket + latch slot). The assembly is rolled 180 about the insertion axis so the
+    latch sits on -Z. Insertion is +Y, cavity floor +12 mm past the mouth. (A clean idealized
+    alternative lives in ``tools/cad_assets/build_cad_rj45_clean.py``; see ASSETS.md.)
+    """
+    return ConnectorSpec(
+        name="cad_rj45",
+        usd_asset_name="cad_rj45.usd",  # resolved from newton_cabling/assets/ first
+        socket_prim_path="/World/Socket",
+        plug_prim_path="/World/Plug",
+        latch_prim_path="/World/Latch",
+        # Latch tab springs from the plug's -Z face (the keyway side). Hinge at the tab's
+        # front root (encoded in the /World/Latch prim translate by build_cad_rj45_clean.py),
+        # axis +x so the free end swings in z; rests flush at 0 and flexes if pushed. It
+        # stays within the jack keyway depth so it slides in without jamming; the revolute
+        # joint provides the spring/flex.
+        latch=LatchSpec(
+            hinge_axis=(1.0, 0.0, 0.0),
+            # The hinge is encoded in the latch PRIM's translation (build_cad_rj45_clean
+            # authors /World/Latch with translate=hinge), so the rig's latch_hinge_offset =
+            # (latch.base - plug.base) + this = hinge + 0. Keep this 0; the pivot is at the
+            # tab root, with no gap.
+            hinge_offset_meters=(0.0, 0.0, 0.0),
+            # Moderate spring so the latch rests flush (angle 0) but FLEXES when pushed during
+            # insertion, then springs back. Gravity is cancelled in apply_control, so a soft
+            # spring won't droop.
+            spring_stiffness=3.0,
+            spring_damping=0.5,
+            travel_lower_radians=-0.4,  # flex range both ways (tuned with the catch)
+            travel_upper_radians=0.4,
+            press_angle_radians=-0.3,
+            limit_damping=1.0e-4,
+        ),
+        contact=ContactSpec(
+            stiffness=1.0e5,
+            damping=0.0,
+            # Real RJ45 clearance is sub-mm, so the bundled 2mm gap would inflate the
+            # plug past the cavity. Use a sub-mm gap + finer SDF to resolve the fit.
+            gap_meters=gap_meters,
+            friction=0.0,
+            sdf_max_resolution=sdf_max_resolution,
+            density=1.0e6,
+        ),
+        cable_radius_meters=0.00325,
+        cable_kinematic_prefix=4,
+        cable_friction=2.0,
+    )

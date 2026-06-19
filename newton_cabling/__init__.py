@@ -11,6 +11,7 @@ from newton_cabling.connector import (
     ConnectorSpec,
     ContactSpec,
     LatchSpec,
+    cad_rj45_connector,
     rj45_connector,
 )
 from newton_cabling.report import (
@@ -52,6 +53,7 @@ __all__ = [
     "LatchState",
     "Phase",
     "TimelineSample",
+    "cad_rj45_connector",
     "evaluate_cycle",
     "outcome_from_dict",
     "outcome_to_dict",
