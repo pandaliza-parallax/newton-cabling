@@ -10,8 +10,14 @@ __pycache__/
 dist/
 uv.lock
 
-# Recordings (large, regenerable by the record_*.py scripts)
+# Recordings & render output (large, regenerable by record_*.py / record_policy.py)
+logs/
 *.rrd
 *.rbl
+*.mp4
 *.json
+*_gs/
 !pyproject.toml
+
+# Training output (logs + checkpoints, regenerable by train_ppo.py)
+runs/
