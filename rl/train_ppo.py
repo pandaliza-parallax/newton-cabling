@@ -66,17 +66,21 @@ class ActorCritic(nn.Module):
 
 
 @torch.no_grad()
-def evaluate_policy(ac: ActorCritic, env: ConnectorVecEnv, steps: int = 80):
-    """Deterministic (mean-action) rollout. Reports the HONEST steady-state metric:
-    the instantaneous fraction of envs in the seated state, averaged over the second
-    half of the horizon (after insertion has had time to complete). The old
-    successes/terminations ratio over-counted fast re-seating envs."""
+def evaluate_policy(ac: ActorCritic, env: ConnectorVecEnv, steps: int = 200):
+    """Deterministic (mean-action) rollout reporting the SETTLED steady-state seated
+    fraction: average over the last `settle_window` steps, after insertion has fully
+    completed. NOTE: horizon raised 80 -> 200 and the window moved to the tail because
+    the old 80-step / second-half metric averaged over the insertion ramp (the plug is
+    still travelling in from the far stage-5 start, longer at high friction), which
+    under-reported true success by ~40 points (e.g. mu=0.5 read 55% but is ~95% settled).
+    The tail window measures whether the plug is seated AND held, not still inserting."""
+    settle_window = 80
     obs = env.reset()
     seated, depth = [], []
     for t in range(steps):
         a = ac.mean_action(obs)
         obs, _, _, succ, depth_mm = env.step(a)
-        if t >= steps // 2:
+        if t >= steps - settle_window:
             seated.append(succ.mean().item())
             depth.append(depth_mm.mean().item())
     sr = sum(seated) / max(1, len(seated))
@@ -124,8 +128,20 @@ def main():
                     help="random_easy_subset starts (lateral + approach + <=15deg rotation); "
                          "uses the 6-DOF driven-d6 rig, no curriculum")
     ap.add_argument("--contact-buffer", type=int, default=64)
-    ap.add_argument("--asset", default="rj45", choices=["rj45", "cad_rj45"],
-                    help="connector asset: bundled toy 'rj45' (default) or real-CAD 'cad_rj45'")
+    ap.add_argument("--asset", default="rj45", choices=["rj45", "cad_rj45", "cad_rj45_real"],
+                    help="connector: toy 'rj45', idealized 'cad_rj45', or real-mesh 'cad_rj45_real'")
+    ap.add_argument("--friction", type=float, default=None,
+                    help="override contact friction μ (cad_rj45 only; default = spec value)")
+    ap.add_argument("--friction-dr", type=float, nargs=2, default=None, metavar=("LO", "HI"),
+                    help="domain-randomize friction per-env over [LO,HI] -> one policy across μ")
+    ap.add_argument("--plug-scale-dr", type=float, nargs=2, default=None, metavar=("LO", "HI"),
+                    help="domain-randomize plug SIZE per-env over [LO,HI] (varies fit clearance)")
+    ap.add_argument("--connector-scale-dr", type=float, nargs=2, default=None, metavar=("LO", "HI"),
+                    help="domain-randomize whole-connector SIZE per-env over [LO,HI] (socket+plug+latch)")
+    ap.add_argument("--obs-contact", action="store_true",
+                    help="add the plug-frame net contact force (3-dim) to the observation")
+    ap.add_argument("--angular-kd", type=float, default=None,
+                    help="override the d6 angular drive damping (default 6.0; higher damps seat wobble)")
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--run-name", default="ppo")
     ap.add_argument("--out", default="runs")
@@ -145,7 +161,10 @@ def main():
     print(f"Building {n} envs ...", flush=True)
     t0 = time.perf_counter()
     env = ConnectorVecEnv(n, contact_buffer=args.contact_buffer, seed=args.seed,
-                          random_easy=args.random_easy, asset=args.asset)
+                          random_easy=args.random_easy, asset=args.asset, friction=args.friction,
+                          obs_contact=args.obs_contact, residual_scale=args.residual_scale,
+                          angular_kd_override=args.angular_kd, friction_dr=args.friction_dr,
+                          plug_scale_dr=args.plug_scale_dr, connector_scale_dr=args.connector_scale_dr)
     if args.residual_scale is not None:
         env.residual_scale = args.residual_scale
     print(f"  built in {time.perf_counter()-t0:.1f}s | obs_dim {env.obs_dim} act_dim {env.act_dim}")

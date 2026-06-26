@@ -26,6 +26,7 @@ curriculum stage), not by absolute travel.
 
 from __future__ import annotations
 
+import functools
 import os
 import sys
 
@@ -62,7 +63,7 @@ START_OUT_DY = -0.050    # m: plug starts this far out of the socket (below the 
 # Residual RL: total_action = clip(base + RESIDUAL_SCALE * policy_residual). The base
 # controller drives the target toward the seated pose (the scripted insert that already
 # seats aligned plugs); the policy only learns a bounded correction on top.
-RESIDUAL_SCALE = 0.15    # small: the residual makes fine corrections, can't overpower the base
+RESIDUAL_SCALE = 1.00    # small: the residual makes fine corrections, can't overpower the base
 SPRING_KE = 50.0
 SPRING_KD = 10.0   # linear damping (sweep showed KD>10 over-damps the insertion -> worse reach).
 #                    The wobble at the seat was ANGULAR, fixed by ANGULAR_KD below, not linear.
@@ -126,7 +127,7 @@ SEAT_OFFSET = 0.003      # m — loosened 2->3mm (physically reasonable for the 
 SEAT_ANGLE = np.deg2rad(3.0)  # tilt kept tight at 3deg (5deg is too sloppy for a connector)
 OOB_LATERAL = 0.06       # m — mbrl MAX_LATERAL
 
-OBS_DIM = 9              # pos_err(3) lin_vel(3) orient_err_rotvec(3)
+OBS_DIM = 12             # pos_err(3) lin_vel(3) orient_err_rotvec(3) ang_vel(3)
 ACT_DIM = 3              # translation env: 3-DOF position. random_easy: 6 (pos + orientation).
 
 # ── per-asset geometry profiles ───────────────────────────────────────────────
@@ -150,7 +151,17 @@ ASSET_PROFILES = {
         plug_y=(0.0, 0.0, 0.0),
         # sub-mm rigid_gap to match the real (tight) RJ45 clearance — 5mm would hold
         # the plug off the cavity walls and prevent any insertion.
-        seat_aim_dy=0.012, box=0.05, rigid_gap=0.00005,
+        seat_aim_dy=0.012, box=0.05, rigid_gap=0.0001,
+        re_lat=0.004, re_approach_min=0.010, re_approach_max=0.030,
+        re_rot=RE_ROT,
+        seat_depth_tol=0.005, seat_offset=0.003, seat_angle=SEAT_ANGLE,
+    ),
+    # REAL CAD geometry: same constants as cad_rj45 but loads cad_rj45_real.usd — the actual
+    # STEP-derived meshes (plug_raw + jack_carved_meters), not the idealized primitives.
+    "cad_rj45_real": dict(
+        spec=functools.partial(cad_rj45_connector, usd_asset_name="cad_rj45_real.usd"),
+        plug_y=(0.0, 0.0, 0.0),
+        seat_aim_dy=0.012, box=0.05, rigid_gap=0.0001,
         re_lat=0.004, re_approach_min=0.010, re_approach_max=0.030,
         re_rot=RE_ROT,
         seat_depth_tol=0.005, seat_offset=0.003, seat_angle=SEAT_ANGLE,
@@ -240,6 +251,54 @@ def write_obs(body_q: wp.array(dtype=wp.transform), body_qd: wp.array(dtype=wp.s
     obs[w, 6] = rv[0] * 3.0
     obs[w, 7] = rv[1] * 3.0
     obs[w, 8] = rv[2] * 3.0
+    # angular velocity: the other half of the body's spatial velocity (spatial_top above is
+    # the linear part the drive uses; spatial_bottom is angular). Gives the policy the rate
+    # of the orientation it's already correcting, so it can damp the seat-tilt wobble.
+    avel = wp.spatial_bottom(body_qd[p])
+    obs[w, 9] = avel[0]
+    obs[w, 10] = avel[1]
+    obs[w, 11] = avel[2]
+
+
+@wp.func
+def _slog(x: float):
+    # signed-log compression: robust to the unknown (large) scale of contact forces
+    return wp.sign(x) * wp.log(1.0 + wp.abs(x))
+
+
+@wp.kernel
+def reduce_contact_plug_force(count: wp.array(dtype=int), force: wp.array(dtype=wp.vec3),
+                              shape0: wp.array(dtype=int), shape1: wp.array(dtype=int),
+                              is_plug: wp.array(dtype=int), shape_to_world: wp.array(dtype=int),
+                              out_force: wp.array(dtype=wp.vec3)):
+    # net contact force ON THE PLUG per env (world frame). Sum only the plug side of each
+    # contact (summing both sides cancels by Newton's 3rd law). The sign convention is
+    # consistent, so the policy learns the mapping regardless of which side force is stored.
+    i = wp.tid()
+    if i >= count[0]:
+        return
+    s0 = shape0[i]
+    s1 = shape1[i]
+    if is_plug[s0] == 1:
+        w = shape_to_world[s0]
+        if w >= 0:
+            wp.atomic_add(out_force, w, -force[i])
+    elif is_plug[s1] == 1:
+        w = shape_to_world[s1]
+        if w >= 0:
+            wp.atomic_add(out_force, w, force[i])
+
+
+@wp.kernel
+def write_contact_obs(body_q: wp.array(dtype=wp.transform), plug_idx: wp.array(dtype=int),
+                      cforce: wp.array(dtype=wp.vec3), obs: wp.array2d(dtype=float)):
+    # plug-frame net contact force, signed-log compressed -> obs[12:15]
+    w = wp.tid()
+    q = wp.transform_get_rotation(body_q[plug_idx[w]])
+    fp = wp.quat_rotate(wp.quat_inverse(q), cforce[w])
+    obs[w, 12] = _slog(fp[0])
+    obs[w, 13] = _slog(fp[1])
+    obs[w, 14] = _slog(fp[2])
 
 
 @wp.kernel
@@ -356,9 +415,14 @@ def place_envs(mask: wp.array(dtype=float), lat_x: wp.array(dtype=float),
 
 class ConnectorVecEnv:
     def __init__(self, n: int, *, contact_buffer: int = 64, seed: int = 0, random_easy: bool = False,
-                 asset: str = "rj45"):
+                 asset: str = "rj45", friction=None, obs_contact: bool = False,
+                 residual_scale=None, angular_kd_override=None, friction_dr=None,
+                 plug_scale_dr=None, plug_scales=None, connector_scale_dr=None,
+                 connector_scales=None):
         self.n = n
-        self.obs_dim = OBS_DIM
+        self.obs_contact = obs_contact
+        # +3 obs dims for the plug-frame net contact force when obs_contact is on
+        self.obs_dim = OBS_DIM + 3 if obs_contact else OBS_DIM
         self.act_dim = 6 if random_easy else ACT_DIM  # 6-DOF (pos+orientation) for the subset
         self.random_easy = random_easy  # set before the rig build (controls 6-DOF rig)
         self.num_stages = len(RE_CURRICULUM if random_easy else CURRICULUM)
@@ -372,7 +436,8 @@ class ConnectorVecEnv:
         self.seat_depth_tol = prof["seat_depth_tol"]
         self.seat_offset = prof["seat_offset"]
         self.seat_angle = prof["seat_angle"]
-        spec = prof["spec"]()
+        # friction override (cad_rj45 only): sweep contact μ without editing the spec default
+        spec = prof["spec"](friction=friction) if friction is not None else prof["spec"]()
         meshes = load_connector_meshes(spec)
         sb, pb, lb = (meshes.socket.base_position, meshes.plug.base_position,
                       meshes.latch.base_position)
@@ -382,12 +447,32 @@ class ConnectorVecEnv:
         builder = new_vbd_builder(gravity=-9.81)
         builder.rigid_gap = prof["rigid_gap"]
         rigs, seat_plug, seat_latch, shape_world = [], [], [], {}
+        # DR the plug SIZE per env (uniform scale -> varies fit clearance vs the fixed cavity).
+        # plug_scales = explicit per-env scales (for viz); plug_scale_dr = random over [lo,hi].
+        self.env_plug_scale = None
+        if plug_scales is not None:
+            self.env_plug_scale = np.asarray(plug_scales, dtype=np.float32)
+        elif plug_scale_dr is not None:
+            lo, hi = float(plug_scale_dr[0]), float(plug_scale_dr[1])
+            self.env_plug_scale = np.random.default_rng(seed + 1).uniform(lo, hi, n).astype(np.float32)
+        # DR the WHOLE connector size (socket+plug+latch scale together): a bigger/smaller
+        # connector at the same relative fit. The seat depth + start distance scale with it.
+        self.env_conn_scale = None
+        if connector_scales is not None:
+            self.env_conn_scale = np.asarray(connector_scales, dtype=np.float32)
+        elif connector_scale_dr is not None:
+            lo, hi = float(connector_scale_dr[0]), float(connector_scale_dr[1])
+            self.env_conn_scale = np.random.default_rng(seed + 2).uniform(lo, hi, n).astype(np.float32)
+        # per-env seat depth (= seat_aim_dy * connector_scale); used for the seat ref + start
+        cscale = self.env_conn_scale if self.env_conn_scale is not None else np.ones(n, np.float32)
+        self.env_seat_dy_t = torch.tensor(self.seat_aim_dy * cscale, dtype=torch.float32, device=DEV)
         cols = max(1, int(np.ceil(np.sqrt(n))))
         for i in range(n):
             shift = np.array([(i % cols) * SPACING, 0.0, (i // cols) * SPACING])
             mouth = pb + plug_y + Z_LIFT + shift       # plug origin = socket MOUTH (dy = 0)
             sl_mouth = lb + plug_y + Z_LIFT + shift
-            aim = np.array([0.0, self.seat_aim_dy, 0.0])  # the true inserted pose is deeper +y
+            ci = float(self.env_conn_scale[i]) if self.env_conn_scale is not None else 1.0
+            aim = np.array([0.0, self.seat_aim_dy * ci, 0.0])  # inserted pose deeper +y (scaled)
             # random_easy adds start orientation error, so the plug needs a 6-DOF rig:
             # a DRIVEN d6 angular (auto-aligns toward control target). Else translation-only.
             rig = add_connector_rig(builder, spec, meshes, socket_pos=sb + Z_LIFT + shift,
@@ -395,7 +480,11 @@ class ConnectorVecEnv:
                                     plug_anchor_pos=mouth + build_start,
                                     lock_rotation=not random_easy,
                                     angular_ke=ANGULAR_KE if random_easy else 0.0,
-                                    angular_kd=ANGULAR_KD if random_easy else 0.0)
+                                    angular_kd=((ANGULAR_KD if angular_kd_override is None
+                                                 else angular_kd_override) if random_easy else 0.0),
+                                    plug_scale=(float(self.env_plug_scale[i])
+                                                if self.env_plug_scale is not None else 1.0),
+                                    connector_scale=ci)
             rigs.append(rig)
             seat_plug.append(mouth + aim)              # seated reference = inserted pose
             seat_latch.append(sl_mouth + aim)
@@ -405,6 +494,19 @@ class ConnectorVecEnv:
         self.model = finalize_for_vbd(builder)
         self.device = self.model.device
         d = self.device
+        # DOMAIN RANDOMIZATION over friction: give each env a μ sampled from [lo,hi] (set on
+        # its connector shapes' material). The batch then spans the friction range, so the one
+        # shared policy must handle any μ -> generalizes across friction. (Spatial DR: μ fixed
+        # per env for the run; that's enough since the policy can't tell envs apart.)
+        self.env_mu = None
+        if friction_dr is not None:
+            lo, hi = float(friction_dr[0]), float(friction_dr[1])
+            mu = self.model.shape_material_mu.numpy().copy()
+            self.env_mu = np.random.default_rng(seed).uniform(lo, hi, size=n).astype(np.float32)
+            for i, r in enumerate(rigs):
+                for s in r.connector_shapes:
+                    mu[s] = self.env_mu[i]
+            self.model.shape_material_mu.assign(mu)
         self.state_0, self.state_1 = self.model.state(), self.model.state()
         self.control = self.model.control()
         self.contacts = self.model.contacts()
@@ -453,8 +555,14 @@ class ConnectorVecEnv:
         self.start_y = wp.zeros(n, dtype=float, device=d)
         self.prev_dist = wp.zeros(n, dtype=float, device=d)
         self.step_count = wp.zeros(n, dtype=int, device=d)
-        self.obs_wp = wp.zeros((n, OBS_DIM), dtype=float, device=d)
+        self.obs_wp = wp.zeros((n, self.obs_dim), dtype=float, device=d)
         self.contact_wp = wp.zeros(n, dtype=float, device=d)
+        if obs_contact:
+            is_plug = np.zeros(self.model.shape_count, dtype=np.int32)
+            for r in rigs:
+                is_plug[r.plug_shape] = 1
+            self.is_plug_shape = wp.array(is_plug, dtype=int, device=d)
+            self.cforce = wp.zeros(n, dtype=wp.vec3, device=d)
         self.rew_wp = wp.zeros(n, dtype=float, device=d)
         self.done_wp = wp.zeros(n, dtype=float, device=d)
         self.succ_wp = wp.zeros(n, dtype=float, device=d)
@@ -467,7 +575,9 @@ class ConnectorVecEnv:
         self._fixed = None  # set via set_fixed_starts() to replay specific start poses
         self.spring_kd = SPRING_KD  # runtime-tunable (sweep critical damping for the seat hold)
 
-        self.residual_scale = RESIDUAL_SCALE  # set to 0.0 to measure the base controller alone
+        # set to 0.0 to measure the base controller alone; raise to give the policy more
+        # authority to override the scripted base (e.g. shove a wedged plug free)
+        self.residual_scale = RESIDUAL_SCALE if residual_scale is None else residual_scale
         # random_easy_subset: fixed reasonable start distribution for THIS small connector,
         # translation-only (rotation is excluded: the d6-angular plug is VBD-unstable).
         self.random_easy = random_easy
@@ -513,7 +623,7 @@ class ConnectorVecEnv:
             approach = torch.full((n,), 0.05, device=DEV)
             rot = torch.zeros(n, 4, device=DEV)
             rot[:, 3] = 1.0                                          # identity quat
-        insert_dist = self.seat_aim_dy + approach  # start is `approach` below the mouth; seated is deeper
+        insert_dist = self.env_seat_dy_t + approach  # per-env (seat_aim_dy*connector_scale) + approach
         self._latx_keep = lat[:, 0].contiguous()
         self._latz_keep = lat[:, 1].contiguous()
         self._ins_keep = insert_dist.contiguous()
@@ -552,10 +662,21 @@ class ConnectorVecEnv:
                           self.contacts.rigid_contact_shape0, self.contacts.rigid_contact_shape1,
                           self.shape_to_world, self.contact_wp), device=self.device)
 
-    def _write_obs(self):
+    def _write_obs(self, reduce_contact=True):
         wp.launch(write_obs, dim=self.n,
                   inputs=(self.state_0.body_q, self.state_0.body_qd, self.plug_idx,
                           self.seated, self.plug_rot, self.obs_wp), device=self.device)
+        if self.obs_contact:
+            self.cforce.zero_()
+            if reduce_contact:  # at reset the contacts are stale (pre-collide) -> leave at 0
+                wp.launch(reduce_contact_plug_force, dim=self.contacts.rigid_contact_force.shape[0],
+                          inputs=(self.contacts.rigid_contact_count, self.contacts.rigid_contact_force,
+                                  self.contacts.rigid_contact_shape0, self.contacts.rigid_contact_shape1,
+                                  self.is_plug_shape, self.shape_to_world, self.cforce),
+                          device=self.device)
+            wp.launch(write_contact_obs, dim=self.n,
+                      inputs=(self.state_0.body_q, self.plug_idx, self.cforce, self.obs_wp),
+                      device=self.device)
 
     def _new_solver(self):
         return SolverVBD(self.model, iterations=8, rigid_contact_hard=False,
@@ -569,7 +690,7 @@ class ConnectorVecEnv:
         self.solver = self._new_solver()
         self.hold_count.zero_()  # reset the consecutive-seated counter each episode
         self.contact_wp.zero_()
-        self._write_obs()
+        self._write_obs(reduce_contact=False)
         wp.synchronize()
         obs = torch.nan_to_num(wp.to_torch(self.obs_wp).clone()).clamp_(-50.0, 50.0)
         return self._add_obs_noise(obs)
@@ -627,6 +748,45 @@ class ConnectorVecEnv:
         obs = torch.nan_to_num(wp.to_torch(self.obs_wp).clone(),
                                nan=0.0, posinf=0.0, neginf=0.0).clamp_(-50.0, 50.0)
         return self._add_obs_noise(obs), rew, done, succ, depth_mm
+
+    def step_direct(self, action):
+        """Apply a 6-D action DIRECTLY, bypassing the scripted base controller — for evaluating a
+        STANDALONE policy (e.g. a VLA). action = [dpos x,y,z (±1->±MAX_DELTA), rot x,y,z (±1->ROT_CMD_RANGE)],
+        i.e. the same 'executed command' record_policy.py --dump stores. Returns (obs, succ, depth_mm)."""
+        action = action.detach()
+        self._act_keep = action[:, :3].clamp(-1.0, 1.0).contiguous()   # position command, NO base
+        act_wp = wp.from_torch(self._act_keep, dtype=wp.float32)
+        wp.launch(integrate_target, dim=self.n,
+                  inputs=(act_wp, self.seated, MAX_DELTA, self.box, self.target), device=self.device)
+        if self.act_dim == 6:
+            self._rotcmd_keep = action[:, 3:6].contiguous()
+            rc_wp = wp.from_torch(self._rotcmd_keep, dtype=wp.float32)
+            wp.launch(set_angular_target, dim=self.n,
+                      inputs=(rc_wp, self.ang_coords, ROT_CMD_RANGE, self.control.joint_target_q),
+                      device=self.device)
+        for _ in range(SUBSTEPS):
+            self.state_0.clear_forces()
+            wp.launch(apply_control, dim=self.n,
+                      inputs=(self.state_0.body_q, self.state_0.body_qd, self.state_0.body_f,
+                              self.model.body_mass, self.plug_idx, self.latch_idx,
+                              self.target, self.grav, SPRING_KE, self.spring_kd), device=self.device)
+            self.model.collide(self.state_0, self.contacts)
+            self.solver.step(self.state_0, self.state_1, self.control, self.contacts, self.dt)
+            self.state_0, self.state_1 = self.state_1, self.state_0
+        wp.launch(write_reward, dim=self.n,
+                  inputs=(self.state_0.body_q, self.state_0.body_qd, self.plug_idx,
+                          self.seated, self.plug_rot, self.start_y, self.prev_dist,
+                          self.hold_count, HOLD_STEPS, self.max_steps,
+                          W_PROG, R_SUCCESS, LAT_WEIGHT, ROT_W, W_VEL,
+                          self.seat_depth_tol, self.seat_offset, self.seat_angle, OOB_LATERAL,
+                          self.rew_wp, self.done_wp, self.succ_wp, self.dist_wp, self.depth_wp),
+                  device=self.device)
+        wp.copy(self.prev_dist, self.dist_wp)
+        succ = wp.to_torch(self.succ_wp).clone()
+        depth_mm = torch.nan_to_num(wp.to_torch(self.depth_wp).clone())
+        self._write_obs()
+        wp.synchronize()
+        return None, succ, depth_mm
 
     def contact_count(self) -> tuple[int, int]:
         return (int(self.contacts.rigid_contact_count.numpy()[0]),
