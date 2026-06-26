@@ -94,6 +94,69 @@ def look_at_quat(eye, target, up=(0.0, 0.0, 1.0), convention: str = "ros") -> li
     return q.tolist()
 
 
+# ── quaternion helpers (scalar-first [w,x,y,z], to match the renderer contract) ──
+def quat_mul_wxyz(a: Sequence[float], b: Sequence[float]) -> list[float]:
+    """Hamilton product a⊗b of two scalar-first quaternions."""
+    aw, ax, ay, az = a
+    bw, bx, by, bz = b
+    return [
+        aw * bw - ax * bx - ay * by - az * bz,
+        aw * bx + ax * bw + ay * bz - az * by,
+        aw * by - ax * bz + ay * bw + az * bx,
+        aw * bz + ax * by - ay * bx + az * bw,
+    ]
+
+
+def quat_rotate_wxyz(q: Sequence[float], v: Sequence[float]) -> np.ndarray:
+    """Rotate vector v by scalar-first quaternion q."""
+    w, x, y, z = q
+    qv = np.array([x, y, z], dtype=np.float64)
+    v = np.asarray(v, dtype=np.float64)
+    return v + 2.0 * np.cross(qv, np.cross(qv, v) + w * v)
+
+
+def euler_deg_to_quat_wxyz(rx: float, ry: float, rz: float) -> list[float]:
+    """XYZ intrinsic euler angles (degrees) → scalar-first quaternion."""
+    hx, hy, hz = (np.deg2rad(r) / 2.0 for r in (rx, ry, rz))
+    qx = [np.cos(hx), np.sin(hx), 0.0, 0.0]
+    qy = [np.cos(hy), 0.0, np.sin(hy), 0.0]
+    qz = [np.cos(hz), 0.0, 0.0, np.sin(hz)]
+    return quat_mul_wxyz(quat_mul_wxyz(qx, qy), qz)
+
+
+def place_on_body(
+    body_pos: Sequence[float],
+    body_quat_wxyz: Sequence[float],
+    *,
+    align_quat_wxyz: Sequence[float] = (1.0, 0.0, 0.0, 0.0),
+    centroid: Sequence[float] = (0.0, 0.0, 0.0),
+) -> Pose:
+    """Renderer pose for a splat riding a body with a fixed alignment + recentre.
+
+    world = R_body * (R_align * (splat - centroid)) + body_pos, so the renderer's
+    ``q*s + pos`` reproduces it with ``q = R_body (x) R_align`` and
+    ``pos = body_pos - q*centroid``. Use ``align`` to spin a +Z-axis splat onto the
+    body's insertion axis, ``centroid`` (the splat's native centre) to seat it on the
+    body origin.
+    """
+    q = quat_mul_wxyz(list(body_quat_wxyz), list(align_quat_wxyz))
+    pos = np.asarray(body_pos, dtype=np.float64) - quat_rotate_wxyz(q, centroid)
+    return pos.tolist(), q
+
+
+def ply_centroid(host_path: str) -> np.ndarray:
+    """1-99th-pct centroid of a ply's gaussian means (the splat's native centre)."""
+    with open(host_path, "rb") as f:
+        raw = f.read()
+    end = raw.find(b"end_header\n") + len(b"end_header\n")
+    hdr = raw[:end].decode("ascii", "replace")
+    n = next(int(ln.split()[-1]) for ln in hdr.splitlines() if ln.startswith("element vertex"))
+    nprop = sum(1 for ln in hdr.splitlines() if ln.startswith("property"))
+    buf = np.frombuffer(raw[end : end + n * nprop * 4], dtype="<f4").reshape(n, nprop)
+    xyz = buf[:, 0:3].astype(np.float64)
+    return (np.percentile(xyz, 1, 0) + np.percentile(xyz, 99, 0)) / 2
+
+
 # ── Newton pose extraction ──────────────────────────────────────────────────────
 def newton_pose(body_q_np: np.ndarray, body_index: int) -> Pose:
     """``(pos[xyz], quat[wxyz])`` for one body from a ``state.body_q.numpy()`` array.

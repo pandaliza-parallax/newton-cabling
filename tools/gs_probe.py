@@ -68,12 +68,16 @@ def main() -> None:
     )
     # focus (the connector — camera frames these)
     ap.add_argument("--ply", nargs="+",
-                    default=[f"{HOST_ETH}/splat-mount.ply", f"{HOST_ETH}/splat-cord.ply"],
+                    default=[f"{HOST_ETH}/trellis-port.ply", f"{HOST_ETH}/trellis-plug.ply"],
                     help="host paths to the focus splats (camera frames their union)")
     ap.add_argument("--recenter", action="store_true",
-                    help="drop each focus splat's centroid to origin before --parts-offset")
+                    help="drop the focus GROUP's union centre to origin (keeps mount/plug "
+                         "relative arrangement) before --parts-offset")
     ap.add_argument("--parts-offset", type=float, nargs=3, default=[0.0, 0.0, 0.0],
                     help="translation applied to the focus splats (set them on the table)")
+    ap.add_argument("--plug-offset", type=float, nargs=3, default=[0.0, 0.0, 0.0],
+                    help="extra translation for the 2nd focus splat (the plug) — separate it "
+                         "from the port (both splats register at the origin, so they overlap)")
     # static scene
     ap.add_argument("--bg-ply", default=None, help="room background splat (host path)")
     ap.add_argument("--bg-pos", type=float, nargs=3, default=[0.0, 0.0, 0.0])
@@ -94,12 +98,21 @@ def main() -> None:
 
     parts_off = np.asarray(args.parts_offset, float)
 
-    # Per-focus offset = (recenter to origin?) + parts_offset. Track final bbox for framing.
+    # Group-recenter: one common offset = -(union centre), so mount and plug keep their
+    # captured relative arrangement instead of collapsing onto each other. Then translate
+    # the whole group by --parts-offset (e.g. onto the table).
+    raw_bounds = [ply_bounds(p) for p in args.ply]
+    if args.recenter:
+        ulo = np.min([lo for lo, _ in raw_bounds], axis=0)
+        uhi = np.max([hi for _, hi in raw_bounds], axis=0)
+        common = -(ulo + uhi) / 2
+    else:
+        common = np.zeros(3)
+    plug_off = np.asarray(args.plug_offset, float)
     focus_offsets, los, his = [], [], []
-    for p in args.ply:
-        lo, hi = ply_bounds(p)
-        rec = -(lo + hi) / 2 if args.recenter else np.zeros(3)
-        off = rec + parts_off
+    for i, (lo, hi) in enumerate(raw_bounds):
+        # index 1 (by [port, plug] convention) gets the extra plug offset
+        off = common + parts_off + (plug_off if i == 1 else np.zeros(3))
         focus_offsets.append(off)
         los.append(lo + off)
         his.append(hi + off)

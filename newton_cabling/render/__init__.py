@@ -5,6 +5,26 @@ does NOT import newton or warp, so it lints/tests off-GPU. The runnable demo is 
 top-level ``record_rj45_insert_gs.py``.
 """
 
-from .gs_bridge import NewtonGSClient, look_at_quat, make_intrinsics, newton_pose
+from .gs_bridge import (
+    NewtonGSClient,
+    euler_deg_to_quat_wxyz,
+    look_at_quat,
+    make_intrinsics,
+    newton_pose,
+    place_on_body,
+    ply_centroid,
+    quat_mul_wxyz,
+    quat_rotate_wxyz,
+)
 
-__all__ = ["NewtonGSClient", "look_at_quat", "make_intrinsics", "newton_pose"]
+__all__ = [
+    "NewtonGSClient",
+    "euler_deg_to_quat_wxyz",
+    "look_at_quat",
+    "make_intrinsics",
+    "newton_pose",
+    "place_on_body",
+    "ply_centroid",
+    "quat_mul_wxyz",
+    "quat_rotate_wxyz",
+]

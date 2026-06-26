@@ -54,7 +54,7 @@ PULLBACK_DEPTH = -0.05
 # Container-visible defaults (host ~/parallax is bind-mounted to /root/parallax).
 ETH = "/root/parallax/gs-sim-vla/scene/assets/objects/ethernet"
 DEFAULT_MOUNT_PLY = f"{ETH}/splat-mount.ply"
-DEFAULT_CORD_PLY = f"{ETH}/splat-cord.ply"
+DEFAULT_CORD_PLY = f"{ETH}/edited-splat-cord.ply"  # cropped to just the plug (cable removed)
 
 
 def target_offset_y(t: float) -> float:
