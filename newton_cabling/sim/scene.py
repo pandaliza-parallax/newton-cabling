@@ -150,6 +150,8 @@ def add_connector_rig(
     lock_rotation: bool = True,
     angular_ke: float = 0.0,
     angular_kd: float = 0.0,
+    plug_scale: float = 1.0,
+    connector_scale: float = 1.0,
 ) -> ConnectorRig:
     """Add the socket/plug/latch bodies, shapes, and joints to ``builder``.
 
@@ -159,21 +161,31 @@ def add_connector_rig(
     """
     cfg = connector_shape_config(spec)
 
+    # connector_scale scales the WHOLE connector (socket + plug + latch) per rig about each
+    # mesh origin (= the mouth, y=0, for both jack flange face and plug leading face), so the
+    # cavity + plug stay concentric at the mouth and only grow/shrink. plug_scale adds the
+    # per-plug FIT variation on top. The caller scales the seat reference + start distance by
+    # connector_scale to match the deeper/shallower cavity.
+    cs = connector_scale
     socket_shape = builder.add_shape_mesh(
         -1,
         mesh=meshes.socket.mesh,
         xform=wp.transform(wp.vec3(*socket_pos), wp.quat_identity()),
+        scale=wp.vec3(cs, cs, cs),
         cfg=cfg,
         label="socket",
     )
     plug_body = builder.add_link(
         xform=wp.transform(wp.vec3(*plug_pos), wp.quat_identity()), label="plug"
     )
-    plug_shape = builder.add_shape_mesh(plug_body, mesh=meshes.plug.mesh, cfg=cfg)
+    ps = plug_scale * cs
+    plug_shape = builder.add_shape_mesh(
+        plug_body, mesh=meshes.plug.mesh, scale=wp.vec3(ps, ps, ps), cfg=cfg)
     latch_body = builder.add_link(
         xform=wp.transform(wp.vec3(*latch_pos), wp.quat_identity()), label="latch"
     )
-    latch_shape = builder.add_shape_mesh(latch_body, mesh=meshes.latch.mesh, cfg=cfg)
+    latch_shape = builder.add_shape_mesh(
+        latch_body, mesh=meshes.latch.mesh, scale=wp.vec3(cs, cs, cs), cfg=cfg)
 
     joint_dof = newton.ModelBuilder.JointDofConfig
     # lock_rotation=True (default, used by the demos) gives a translation-only plug:

@@ -34,14 +34,20 @@ Location: `gs-sim-vla/scene/assets/objects/ethernet/`
 
 ## 2. PLUG + JACK — NEW assets (`cad_rj45`)
 
-> **Current build (2026-06-18): STEP-derived, cleaned + flipped.** `build_cad_rj45_usd.py`
-> reads the real STEP tessellation (`plug_raw.obj` cleaned to its outer shell — internal pins/
-> debris dropped; `jack_carved_meters.obj` = stepped carved bore) and authors `cad_rj45.usd`:
-> `/World/Plug` = real molded plug shell, `/World/Latch` = real latch tab split off (revolute),
-> `/World/Socket` = carved stepped bore. Rolled 180 about the insertion axis (latch on −Z).
-> Seats 100%. A **clean idealized** alternative (parametric primitives sized to the real parts,
-> crisper in rerun) lives in `build_cad_rj45_clean.py` — swap which one writes `cad_rj45.usd` to
-> switch. (We tried the idealized build; user preferred the real-CAD shell, so it's the default.)
+> **Current build (2026-06-22): CLEAN IDEALIZED.** `build_cad_rj45_clean.py` authors
+> `cad_rj45.usd` directly from clean parametric primitives sized to the real McMaster parts,
+> booleaned (manifold3d) into watertight solids: `/World/Socket` = square D-flange panel jack +
+> keyed RJ45 cavity + **catch ledge** + 2 mounting holes; `/World/Plug` = clean 8P8C body +
+> molded boot + cable stub; `/World/Latch` = the **stepped-keyway tab** the user drew, on a
+> revolute hinge. Insertion +Y, latch + keyway on −Z (matches the 1422N17 drawing), cavity floor
+> +12 mm. The plug cross-section is the user's sketched shape (`KEYWAY_STEPS`).
+>
+> **Latch click:** the `CATCH_LEDGE` (`LEDGE_H`) makes the latch physically deflect ~1.3° + snap
+> back on insertion — deliberately SMALL. A rigid VBD latch can't flex over a real-depth catch
+> without jamming the plug: a visible/locking click drops seating to ~36%; this subtle one keeps
+> ~86%; no ledge = 100%. (User chose the subtle physical click.) The STEP-tessellation + carve
+> pipeline below (`build_cad_rj45_usd.py` / `build_jack_carved.py` / `raw_export.py`) is kept for
+> reference but no longer shipped.
 
 ### Full-fidelity-from-STEP pipeline (the current shipped build)
 

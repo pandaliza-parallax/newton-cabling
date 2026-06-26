@@ -38,7 +38,7 @@ from pxr import Gf, Usd, UsdGeom, Vt
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.dirname(os.path.dirname(HERE))
 SRC = os.path.join(HERE, "src")
-OUT = os.path.join(REPO, "newton_cabling", "assets", "cad_rj45.usd")
+OUT = os.environ.get("CAD_RJ45_OUT") or os.path.join(REPO, "newton_cabling", "assets", "cad_rj45.usd")
 
 # Mating-frame constants measured by gs-sim-vla/build_collision.py (metres, user +Z frame).
 MOUTH_Z = 0.030       # jack cavity mouth plane in the user hole frame

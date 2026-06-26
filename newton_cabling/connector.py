@@ -166,31 +166,38 @@ def rj45_connector() -> ConnectorSpec:
     )
 
 
-def cad_rj45_connector(gap_meters: float = 0.00005, sdf_max_resolution: int = 512) -> ConnectorSpec:
-    """Real-CAD RJ45 connector from the gs-sim-vla meshes (McMaster 9953K216 plug,
-    1422N17 panel jack), as a Newton-ready merged USD built by
-    ``tools/cad_assets/build_cad_rj45_usd.py`` from the real STEP tessellation.
+def cad_rj45_connector(
+    gap_meters: float = 0.0001, sdf_max_resolution: int = 512, friction: float = 0.5,
+    usd_asset_name: str = "cad_rj45.usd",
+) -> ConnectorSpec:
+    """RJ45 connector modelled on the real McMaster parts (9953K216 Cat5e plug, 1422N17
+    panel jack), authored as clean idealized geometry by
+    ``tools/cad_assets/build_cad_rj45_clean.py``.
 
-    Same prim layout as :func:`rj45_connector` (/World/Socket,/Plug,/Latch) so the rig +
-    RL env load it unchanged. /World/Plug is the real molded plug cleaned to its outer
-    shell (internal contact pins/debris dropped); /World/Latch is the real latch tab split
-    off it, a separate body on a revolute hinge. /World/Socket is the carved bore (the
-    1422N17 contact block carved out so the full-size plug seats), a snug stepped cavity
-    (body pocket + latch slot). The assembly is rolled 180 about the insertion axis so the
-    latch sits on -Z. Insertion is +Y, cavity floor +12 mm past the mouth. (A clean idealized
-    alternative lives in ``tools/cad_assets/build_cad_rj45_clean.py``; see ASSETS.md.)
+    The raw STEP tessellations are 500-1300+ disjoint solids (internal pins, contact blades,
+    molded boots) and the collision-carve added voxel roughness, so they never rendered like
+    the McMaster CAD drawings. Instead clean parametric primitives SIZED TO THE REAL PARTS are
+    booleaned into watertight solids: /World/Socket = square D-flange panel jack with a keyed
+    RJ45 cavity + a catch ledge + 2 mounting holes; /World/Plug = clean 8P8C body + molded
+    boot + cable stub; /World/Latch = the stepped keyway tab on a revolute hinge. Same prim
+    layout as :func:`rj45_connector` so the rig + RL env load it unchanged. Insertion is +Y;
+    latch + jack keyway on -Z (matching the drawing); cavity floor +12 mm past the mouth.
+
+    Latch click: the jack's catch ledge makes the latch physically deflect ~1.3 deg and snap
+    back on insertion. It is deliberately SMALL -- a rigid VBD latch can't flex over a real-
+    depth catch without jamming the plug, so a bigger/locking click would cost seating (see
+    ASSETS.md). The STEP-tessellation pipeline (build_cad_rj45_usd.py) is kept for reference.
     """
     return ConnectorSpec(
         name="cad_rj45",
-        usd_asset_name="cad_rj45.usd",  # resolved from newton_cabling/assets/ first
+        usd_asset_name=usd_asset_name,  # default cad_rj45.usd; cad_rj45_real.usd for real mesh
         socket_prim_path="/World/Socket",
         plug_prim_path="/World/Plug",
         latch_prim_path="/World/Latch",
         # Latch tab springs from the plug's -Z face (the keyway side). Hinge at the tab's
         # front root (encoded in the /World/Latch prim translate by build_cad_rj45_clean.py),
-        # axis +x so the free end swings in z; rests flush at 0 and flexes if pushed. It
-        # stays within the jack keyway depth so it slides in without jamming; the revolute
-        # joint provides the spring/flex.
+        # axis +x so the free end swings in z; rests flush at 0 and flexes over the jack's
+        # catch ledge during insertion, then snaps back (the subtle click).
         latch=LatchSpec(
             hinge_axis=(1.0, 0.0, 0.0),
             # The hinge is encoded in the latch PRIM's translation (build_cad_rj45_clean
@@ -198,23 +205,23 @@ def cad_rj45_connector(gap_meters: float = 0.00005, sdf_max_resolution: int = 51
             # (latch.base - plug.base) + this = hinge + 0. Keep this 0; the pivot is at the
             # tab root, with no gap.
             hinge_offset_meters=(0.0, 0.0, 0.0),
-            # Moderate spring so the latch rests flush (angle 0) but FLEXES when pushed during
-            # insertion, then springs back. Gravity is cancelled in apply_control, so a soft
-            # spring won't droop.
-            spring_stiffness=3.0,
-            spring_damping=0.5,
-            travel_lower_radians=-0.4,  # flex range both ways (tuned with the catch)
-            travel_upper_radians=0.4,
+            # SOFT spring (0.5) so the latch flexes over the catch ledge with a light touch
+            # and snaps back. Stiffer and it won't deflect; softer and it won't snap. Gravity
+            # is cancelled in apply_control, so a soft spring won't droop.
+            spring_stiffness=0.15,
+            spring_damping=0.03,
+            travel_lower_radians=-0.6,  # flex range both ways (tuned with the catch)
+            travel_upper_radians=0.6,
             press_angle_radians=-0.3,
             limit_damping=1.0e-4,
         ),
         contact=ContactSpec(
-            stiffness=1.0e5,
+            stiffness=1.0e6,
             damping=0.0,
             # Real RJ45 clearance is sub-mm, so the bundled 2mm gap would inflate the
             # plug past the cavity. Use a sub-mm gap + finer SDF to resolve the fit.
             gap_meters=gap_meters,
-            friction=0.0,
+            friction=friction,
             sdf_max_resolution=sdf_max_resolution,
             density=1.0e6,
         ),
