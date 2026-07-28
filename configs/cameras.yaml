@@ -1,0 +1,28 @@
+# Real RealSense camera intrinsics, calibrated at the given resolution.
+# Used by record_sbot_scene_gs.py to build each camera's 3x3 K (gsplat honors
+# fx!=fy and off-center cx/cy). NOTE: the renderer must output at this same
+# width/height (DalusSimCore renderer._image_width/height) or the K won't match.
+
+wrist:            # Intel RealSense D415 (eye-in-hand, on wrist_3) -- same model as front
+  model: d415
+  width: 640
+  height: 480
+  fx: 605.779541015625
+  fy: 605.2867431640625
+  cx: 326.1367492675781
+  cy: 229.87620544433594
+  distortion:     # recorded for reference; the gsplat renderer is pinhole (ignores these)
+    - 0.11365169459064517
+    - -0.26563699511495903
+    - -0.00017237357644643502
+    - 0.0038844000279642864
+    - -0.00006650762289783777
+
+front:            # Intel RealSense D415 (third-person / front view)
+  model: d415
+  width: 640
+  height: 480
+  fx: 605.779541015625
+  fy: 605.2867431640625
+  cx: 326.1367492675781
+  cy: 229.87620544433594

@@ -84,23 +84,31 @@ def _quat_x(th):  # rotation about local x by th (the hinge axis)
 
 
 def _save_gs(frames, out_dir):
-    """Save GS frames as PNGs + a video (mp4 if imageio-ffmpeg is present, else gif)."""
+    """Save GS frames as PNGs + a VLC-playable mp4.
+
+    imageio.mimsave's h264 (even with +faststart) wouldn't open in VLC, so we encode the PNG
+    sequence with a direct ffmpeg call using the settings that play in VLC/QuickTime
+    (libx264 + yuv420p + high profile + crf18 + faststart). Falls back to a gif if ffmpeg fails.
+    """
     os.makedirs(out_dir, exist_ok=True)
     from PIL import Image
 
     for i, fr in enumerate(frames):
         Image.fromarray(fr).save(os.path.join(out_dir, f"frame_{i:04d}.png"))
     try:
-        import imageio.v2 as imageio
+        import subprocess  # noqa: PLC0415
 
-        imageio.mimsave(os.path.join(out_dir, "rollout.mp4"), frames, fps=30,
-                        quality=8, macro_block_size=1, pixelformat="yuv420p",
-                        # +faststart (moov atom up front) + high profile -> plays in VLC/QuickTime
-                        output_params=["-movflags", "+faststart", "-profile:v", "high"])
+        import imageio_ffmpeg  # noqa: PLC0415
+        mp4 = os.path.join(out_dir, "rollout.mp4")
+        subprocess.run([imageio_ffmpeg.get_ffmpeg_exe(), "-y", "-framerate", "30",
+                        "-i", os.path.join(out_dir, "frame_%04d.png"),
+                        "-c:v", "libx264", "-pix_fmt", "yuv420p", "-profile:v", "high",
+                        "-crf", "18", "-movflags", "+faststart", "-an", mp4],
+                       check=True, capture_output=True)
         vid = "rollout.mp4"
-    except Exception:  # noqa: BLE001 — ffmpeg plugin may be absent; gif always works
-        import imageio.v2 as imageio
-
+    except Exception as e:  # noqa: BLE001 — ffmpeg may fail; gif always works
+        print(f"[gs] ffmpeg mp4 failed ({e}); writing gif")
+        import imageio.v2 as imageio  # noqa: PLC0415
         imageio.mimsave(os.path.join(out_dir, "rollout.gif"), frames[::2], fps=20)
         vid = "rollout.gif"
     print(f"[gs] {len(frames)} frames -> {out_dir}/ ({vid})")
@@ -144,11 +152,16 @@ def main():
                          "end, measured at z~18mm) -> Newton +Y so the plug inserts contacts-first.")
     ap.add_argument("--mount-anchor", type=float, nargs=3, default=[0.0, 0.0, 0.030],
                     help="JACK obj-frame point pinned to the Newton socket origin (m); cavity mouth z=MOUTH_Z")
+    ap.add_argument("--mount-pos", type=float, nargs=3, default=[0.0, 0.0, 0.0],
+                    help="extra translation (m) to MOVE THE JACK only (with --mount-rot to rotate it). "
+                         "NOTE: moves the jack but not the plug -> they decouple (framing/prop use).")
     ap.add_argument("--plug-anchor", type=float, nargs=3, default=[-0.0015, -0.0015, 0.0172],
                     help="PLUG obj-frame point pinned to the Newton plug origin (m); mating-face "
                          "centroid (gold contacts at z~17mm), measured from cad_plug_registered.ply")
     ap.add_argument("--verify-overlay", action="store_true",
-                    help="render ONE frame with the plug forced to the SEATED pose (overlay_seated.png) and exit")
+                    help="render ONE frame with the plug at a fixed pose (overlay_*.png) and exit")
+    ap.add_argument("--unseated", action="store_true",
+                    help="--verify-overlay: render the plug at its START/approach pose (NOT seated)")
     # openpi/pi0.5 dataset dump (raw per-step image+state+action; convert with raw_to_lerobot.py)
     ap.add_argument("--dump", default=None,
                     help="dump a raw VLA dataset to this dir (needs --gs): per step image + plug pose + "
@@ -174,6 +187,12 @@ def main():
     ap.add_argument("--gs-cam-dist", type=float, default=0.4,
                     help="camera distance from the connector in METRES (0.4 shows the table; "
                          "drop to ~0.12 for a tight connector close-up)")
+    ap.add_argument("--gs-cam-dir", type=float, nargs=3, default=[0.5, -0.6, 0.5],
+                    help="camera direction (unit-ish offset from the connector); orbit this to "
+                         "frame the insertion. e.g. side-on '1 -0.2 0.2', down-the-mouth '0 -1 0.25'")
+    ap.add_argument("--gs-gamma", type=float, default=1.0,
+                    help="post-render gamma lift to brighten the dark jack cavity (gs splats can't "
+                         "be relit). 1.0=off; try 1.8-2.4. Lifts shadows much more than highlights.")
     args = ap.parse_args()
 
     env = ConnectorVecEnv(args.envs, seed=args.seed, random_easy=args.random_easy, asset=args.asset)
@@ -185,10 +204,14 @@ def main():
     # difficulty label differs by mode: random_easy ramps a scale, else a lateral offset
     diff = (f"re_scale {env.re_scale:.2f}" if env.random_easy
             else f"<= {env._mag*1000:.1f}mm offset")
-    if args.base:
+    if args.base or args.eval_vla or args.verify_overlay:
+        # No RL ActorCritic needed: --eval-vla uses the pi0.5 server (step_direct);
+        # --verify-overlay forces the seated pose; --base is the scripted controller.
         env.residual_scale = 0.0
         ac = None
-        print(f"recording BASE controller | {args.asset} | stage {args.stage} ({diff})")
+        _mode = "VLA eval (no RL policy)" if args.eval_vla else (
+            "verify-overlay" if args.verify_overlay else "BASE controller")
+        print(f"recording {_mode} | {args.asset} | stage {args.stage} ({diff})")
     else:
         ac = ActorCritic(env.obs_dim, env.act_dim).to(DEV)
         ac.load_state_dict(torch.load(args.checkpoint, map_location=DEV))
@@ -219,6 +242,7 @@ def main():
         # Shift the whole physics connector (socket + plug) from its physics frame onto the
         # table in the ROOM frame, so it composites with the table/room splats.
         scene_off = np.array(args.table_place) - socket_pos
+        mount_off = np.array(args.mount_pos, dtype=float)   # extra jack-only translation
         # Anchors (obj-frame mating face / mouth) pin each splat to the Newton body origin,
         # NOT the splat's geometric centroid (ply_centroid) which would offset insertion depth.
         mount_c, plug_c = np.array(args.mount_anchor), np.array(args.plug_anchor)
@@ -226,7 +250,7 @@ def main():
         plug_align = euler_deg_to_quat_wxyz(*args.plug_rot)
         # camera frames the connector (on the table); 0.4 m back shows the table around it
         target = np.array(args.table_place)
-        cam_dir = np.array([0.5, -0.6, 0.5])
+        cam_dir = np.array(args.gs_cam_dir, dtype=float)
         cam_dir /= np.linalg.norm(cam_dir)
         eye = (target + cam_dir * args.gs_cam_dist).tolist()
         # object order [table?, mount, plug]; room is the client's separate bg slot
@@ -238,30 +262,38 @@ def main():
             look_at_quat(eye, target.tolist(), up=(0, 0, 1), convention="ros"),
             bg_ply=_h2c(args.gs_bg) if args.gs_bg else None,
         )
+        # post-render gamma lift: gs splats are baked (no scene light possible), so this is the
+        # only "brighten". gamma>1 lifts shadows (the dark jack cavity) far more than highlights.
+        _gamma = float(args.gs_gamma)
+        def _post(rgb):  # noqa: E306
+            return rgb if _gamma == 1.0 else np.clip(rgb, 0.0, 1.0) ** (1.0 / _gamma)
         gs_pi0, gs_frames = int(pi_np[0]), []
         print(f"[gs] composite | socket->{np.round(args.table_place, 3)} | "
               f"bg={'on' if args.gs_bg else 'off'} table={'on' if has_table else 'off'} | "
               f"mount_rot={args.mount_rot} plug_rot={args.plug_rot}")
 
     if args.gs and args.verify_overlay:
-        # Force env-0's plug to the exact SEATED pose and render one frame, so the splat
-        # should sit flush in the jack if the obj->Newton calibration is right.
+        # Render ONE frame at a fixed plug pose. SEATED by default (checks the obj->Newton
+        # calibration); --unseated uses the env reset/start pose (plug not inserted).
         from PIL import Image  # noqa: PLC0415
+        env.reset()                                   # deterministic start pose (per --seed)
         bq = env.state_0.body_q.numpy()
-        bq[gs_pi0, 0:3] = env.seated.numpy()[0]       # seated position (env 0)
-        bq[gs_pi0, 3:7] = env.plug_rot.numpy()[0]     # seated orientation (xyzw, scalar-last)
-        env.state_0.body_q.assign(bq)
+        if not args.unseated:
+            bq[gs_pi0, 0:3] = env.seated.numpy()[0]   # force seated position (env 0)
+            bq[gs_pi0, 3:7] = env.plug_rot.numpy()[0]  # seated orientation (xyzw, scalar-last)
+            env.state_0.body_q.assign(bq)
         pp, pq = newton_pose(env.state_0.body_q.numpy(), gs_pi0)
-        mount_pose = place_on_body(socket_pos + scene_off, [1.0, 0.0, 0.0, 0.0],
+        mount_pose = place_on_body(socket_pos + scene_off + mount_off, [1.0, 0.0, 0.0, 0.0],
                                    align_quat_wxyz=mount_align, centroid=mount_c)
         plug_pose = place_on_body(np.array(pp) + scene_off, pq,
                                   align_quat_wxyz=plug_align, centroid=plug_c)
         poses = ([table_pose] if has_table else []) + [mount_pose, plug_pose]
-        rgb = gs_client.render(poses)
+        rgb = _post(gs_client.render(poses))
         outd = args.gs_out or f"{args.out}_gs"
         os.makedirs(outd, exist_ok=True)
-        Image.fromarray((rgb * 255.0).clip(0, 255).astype("uint8")).save(os.path.join(outd, "overlay_seated.png"))
-        print(f"[gs] verify-overlay: plug at SEATED pose -> {outd}/overlay_seated.png")
+        name = "overlay_unseated.png" if args.unseated else "overlay_seated.png"
+        Image.fromarray((rgb * 255.0).clip(0, 255).astype("uint8")).save(os.path.join(outd, name))
+        print(f"[gs] verify-overlay: plug at {'START (unseated)' if args.unseated else 'SEATED'} pose -> {outd}/{name}")
         return
 
     if args.gs and args.dump:
@@ -281,12 +313,12 @@ def main():
             for f in range(args.frames):
                 bq = env.state_0.body_q.numpy()
                 pp, pq = newton_pose(bq, gs_pi0)               # plug pose (world)
-                mount_pose = place_on_body(socket_pos + scene_off, [1.0, 0.0, 0.0, 0.0],
+                mount_pose = place_on_body(socket_pos + scene_off + mount_off, [1.0, 0.0, 0.0, 0.0],
                                            align_quat_wxyz=mount_align, centroid=mount_c)
                 plug_pose = place_on_body(np.array(pp) + scene_off, pq,
                                           align_quat_wxyz=plug_align, centroid=plug_c)
                 poses = ([table_pose] if has_table else []) + [mount_pose, plug_pose]
-                rgb = (gs_client.render(poses) * 255.0).clip(0, 255).astype("uint8")
+                rgb = (_post(gs_client.render(poses)) * 255.0).clip(0, 255).astype("uint8")
                 if H is None:
                     H, W = rgb.shape[:2]
                 Image.fromarray(rgb).save(os.path.join(ep_dir, f"frame_{f:06d}.png"))
@@ -324,28 +356,33 @@ def main():
         from openpi_client import websocket_client_policy as _wcp  # noqa: PLC0415
         client = _wcp.WebsocketClientPolicy(host=args.vla_host, port=args.vla_port)
         print(f"[eval] VLA server {args.vla_host}:{args.vla_port} | meta={client.get_server_metadata()}")
+        outd = args.gs_out or f"{args.out}_gs"   # rollout videos saved here, one folder per episode
         n_seat = 0
         for ep in range(args.episodes):
             obs = env.reset()
-            seated, depth = False, None
+            seated, depth, frames, traj = False, None, [], []
             for _ in range(args.frames):
                 bq = env.state_0.body_q.numpy()
                 pp, pq = newton_pose(bq, gs_pi0)
-                mount_pose = place_on_body(socket_pos + scene_off, [1.0, 0.0, 0.0, 0.0],
+                mount_pose = place_on_body(socket_pos + scene_off + mount_off, [1.0, 0.0, 0.0, 0.0],
                                            align_quat_wxyz=mount_align, centroid=mount_c)
                 plug_pose = place_on_body(np.array(pp) + scene_off, pq,
                                           align_quat_wxyz=plug_align, centroid=plug_c)
                 poses = ([table_pose] if has_table else []) + [mount_pose, plug_pose]
-                rgb = (gs_client.render(poses) * 255.0).clip(0, 255).astype("uint8")
+                rgb = (_post(gs_client.render(poses)) * 255.0).clip(0, 255).astype("uint8")
+                frames.append(rgb)
                 state = np.concatenate([np.array(pp) - socket_pos, np.array(pq)]).astype(np.float32)
+                traj.append(state)                                    # plug pose in socket frame [pos3,quat4] (wxyz)
                 result = client.infer({"observation/image": rgb, "observation/state": state, "prompt": args.prompt})
                 act = np.asarray(result["actions"])[0]                # first action of the chunk (6,)
                 a = torch.as_tensor(act, dtype=torch.float32, device=DEV).unsqueeze(0)
                 _, succ, depth = env.step_direct(a)
                 seated = seated or bool(succ[0].item() > 0.5)
+            _save_gs(frames, os.path.join(outd, f"ep_{ep:04d}"))      # PNGs + rollout.mp4 per episode
+            np.save(os.path.join(outd, f"ep_{ep:04d}", "plug_traj.npy"), np.stack(traj))  # (T,7) for arm replay
             n_seat += int(seated)
             print(f"[eval] ep {ep + 1}/{args.episodes}: seated={seated}  depth={float(depth.mean()):.1f}mm")
-        print(f"[eval] VLA seated {n_seat}/{args.episodes} on the held-out starts (seed {args.seed})")
+        print(f"[eval] VLA seated {n_seat}/{args.episodes} -> videos in {outd}/ep_*/  (seed {args.seed})")
         return
 
     for f in range(args.frames):
@@ -372,12 +409,12 @@ def main():
             bq = env.state_0.body_q.numpy()
             pp, pq = newton_pose(bq, gs_pi0)
             # shift socket + plug onto the table (room frame), keeping their relative motion
-            mount_pose = place_on_body(socket_pos + scene_off, [1.0, 0.0, 0.0, 0.0],
+            mount_pose = place_on_body(socket_pos + scene_off + mount_off, [1.0, 0.0, 0.0, 0.0],
                                        align_quat_wxyz=mount_align, centroid=mount_c)
             plug_pose = place_on_body(np.array(pp) + scene_off, pq,
                                       align_quat_wxyz=plug_align, centroid=plug_c)
             poses = ([table_pose] if has_table else []) + [mount_pose, plug_pose]
-            rgb = gs_client.render(poses)
+            rgb = _post(gs_client.render(poses))
             gs_frames.append((rgb * 255.0).clip(0, 255).astype("uint8"))
         sim_time += dt
         if f % 30 == 0 or f == args.frames - 1:

@@ -203,6 +203,7 @@ class NewtonGSClient:
         show_viewer: bool = False,
         setup_timeout: float = 300.0,
         dry_run: bool = False,
+        extra_cameras: Sequence[Pose] | None = None,
     ):
         self.num_envs = int(num_envs)
         self.env_keys = [f"env_{i}" for i in range(self.num_envs)]
@@ -213,6 +214,16 @@ class NewtonGSClient:
         self.cam_K = np.asarray(cam_K, np.float64)
         self.cam_pos = [float(v) for v in cam_pos]
         self.cam_quat = [float(v) for v in cam_quat]
+        # Optional STATIC extra cameras rendered in the SAME frame (e.g. a perpendicular side view).
+        # render() then returns (n_cams, H, W, 3) instead of (H, W, 3). Splat SETUP is unchanged,
+        # so adding cameras needs no renderer restart (cameras are sent per UPDATE). Entries are
+        # (pos, quat) or (pos, quat, K); K=None -> use the primary cam_K. render(dyn_cameras=...)
+        # appends per-frame cameras after these (e.g. a wrist eye-in-hand cam that follows a body).
+        self.extra_cameras = []
+        for cam in (extra_cameras or []):
+            p, q = cam[0], cam[1]
+            kc = np.asarray(cam[2], np.float64) if len(cam) > 2 and cam[2] is not None else None
+            self.extra_cameras.append(([float(v) for v in p], [float(v) for v in q], kc))
         self.dry_run = dry_run
         self.last_setup: dict | None = None
         self.last_update: dict | None = None
@@ -303,7 +314,9 @@ class NewtonGSClient:
             time.sleep(0.001)
         return False
 
-    def _wait_images(self, pid: str, timeout: float = 30.0) -> np.ndarray:
+    def _wait_images(self, pid: str, timeout: float = 120.0) -> np.ndarray:
+        # 120s (was 30s): the FIRST render after a cold renderer loads all splats (the ~106MB
+        # background is slow); later renders return in ms, so a high cap only helps the cold case.
         t0 = time.time()
         while time.time() - t0 < timeout:
             data = self._recv.fetch_data()
@@ -313,7 +326,7 @@ class NewtonGSClient:
         raise RuntimeError("[gs] timed out waiting for rendered views")
 
     # ── per-step render ─────────────────────────────────────────────────────────
-    def render(self, obj_poses: Sequence[Pose]) -> np.ndarray:
+    def render(self, obj_poses: Sequence[Pose], dyn_cameras: Sequence | None = None) -> np.ndarray:
         """Render one frame.
 
         ``obj_poses`` is one ``(pos[xyz], quat[wxyz])`` per ``ply_paths`` entry, in
@@ -328,10 +341,16 @@ class NewtonGSClient:
         entries = [([float(c) for c in p], [float(c) for c in q]) for p, q in poses]
         K = self._K
         T = {k: entries for k in self.env_keys}
-        cams = {
-            k: [{K["CAM_K"]: self.cam_K, K["CAM_POS"]: self.cam_pos, K["CAM_QUAT"]: self.cam_quat}]
-            for k in self.env_keys
-        }
+        def _cam(pos, quat, kc):
+            return {K["CAM_K"]: (self.cam_K if kc is None else np.asarray(kc, np.float64)),
+                    K["CAM_POS"]: [float(c) for c in pos], K["CAM_QUAT"]: [float(c) for c in quat]}
+        cam_list = [_cam(self.cam_pos, self.cam_quat, None)]
+        for (p, q, kc) in self.extra_cameras:
+            cam_list.append(_cam(p, q, kc))
+        for cam in (dyn_cameras or []):                    # per-frame cams (e.g. wrist eye-in-hand)
+            cam_list.append(_cam(cam[0], cam[1], cam[2] if len(cam) > 2 else None))
+        ncam = len(cam_list)
+        cams = {k: cam_list for k in self.env_keys}
         pid = secrets.token_hex(4)
         update = {
             "pckg_id": pid,
@@ -343,9 +362,11 @@ class NewtonGSClient:
         if self.dry_run:
             h = int(self.cam_K[1, 2] * 2)
             w = int(self.cam_K[0, 2] * 2)
-            return np.zeros((h, w, 3), np.float32)
+            return (np.zeros((h, w, 3), np.float32) if ncam == 1
+                    else np.zeros((ncam, h, w, 3), np.float32))
 
         self._send.update(update)
-        views = self._wait_images(pid)  # (E, H, W, 3)
-        views = views.astype(np.float32).reshape(self.num_envs, *views.shape[1:])
-        return views[0] if self.num_envs == 1 else views
+        views = self._wait_images(pid).astype(np.float32)  # (E*C, H, W, 3), C = ncam
+        if self.num_envs == 1:
+            return views[0] if ncam == 1 else views  # (H,W,3) or (C,H,W,3)
+        return views.reshape(self.num_envs, ncam, *views.shape[1:])
