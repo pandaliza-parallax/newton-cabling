@@ -21,3 +21,8 @@ logs/
 
 # Training output (logs + checkpoints, regenerable by train_ppo.py)
 runs/
+
+# ---- Model checkpoints (never commit; regenerable by the trainers) ----
+*.pt
+*.pth
+*.ckpt
