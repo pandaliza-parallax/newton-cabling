@@ -1,7 +1,7 @@
 """Minimal viz: render JUST the jack + connector splats (no arm / pedestal / IK), one frame.
 
 Places the jack at --jack-pos/--jack-rpy and the connector at the chosen frame of a recorded
-plug trajectory (socket-frame), mapped onto the jack EXACTLY as record_sbot_scene_gs.py does:
+plug trajectory (socket-frame), mapped onto the jack EXACTLY as scripts/record_sbot_scene_gs.py does:
     conn_world_pos  = jack_pos + R(jack_q) . traj[i][:3]
     conn_world_quat = jack_q  o  traj[i][3:7]
 So this isolates the jack<->connector alignment with none of the arm machinery.
@@ -9,7 +9,7 @@ So this isolates the jack<->connector alignment with none of the arm machinery.
 Run (renderer container up + freshly restarted; SHM root-owned -> sudo):
     cd newton-cabling
     sudo PYTHONPATH=/home/pandaliza/parallax/data-generator/sim_engine/DalusPySim \
-        .venv/bin/python viz_jack_connector.py --out viz_jc --frame 0
+        .venv/bin/python scripts/viz_jack_connector.py --out viz_jc --frame 0
   --frame 0   the connector's INITIAL pose (~10mm off the jack)
   --frame -1  SEATED (connector in the jack)
   --dry-run   skip the renderer/SHM
@@ -24,7 +24,7 @@ import sys
 
 import numpy as np
 
-sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))  # repo root
 from newton_cabling.render.gs_bridge import (  # noqa: E402
     NewtonGSClient,
     euler_deg_to_quat_wxyz,

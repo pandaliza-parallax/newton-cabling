@@ -9,7 +9,7 @@ colour rather than a photoreal texture.
 
 Output matches the arm splats in sbot_gs/flat: the flat (SH deg-0) 14-property
 layout, in each link's local frame, so the link's Newton body transform IS its
-splat transform (1:1 pass-through, like record_sbot_gs.py). Defaults are tuned to
+splat transform (1:1 pass-through, like scripts/record_sbot_gs.py). Defaults are tuned to
 the arm splats -- ~1.5 mm isotropic Gaussians, solid opacity, the AG-145's dark
 grey (colour 0.2, f_dc ~ -1.06).
 

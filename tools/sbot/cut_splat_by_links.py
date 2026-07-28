@@ -21,7 +21,7 @@ Two steps:
      Each Gaussian is assigned to the nearest finger-link surface, dropped if beyond
      --threshold, transformed into that link's local frame, and written as
      <link>.ply in the flat (SH deg-0) layout your arm splats use, so the link's
-     Newton body transform IS its splat transform (1:1, like record_sbot_gs.py).
+     Newton body transform IS its splat transform (1:1, like scripts/record_sbot_gs.py).
 
 IMPORTANT: --theta must match the gripper opening the splat was captured at, so the
 assembled meshes line up with the splat. Use --self-test to validate the geometry

@@ -7,14 +7,14 @@
 # ARM HOME JOINTS J0..J5 (deg). This is the arm's initial pose AND the IK seed branch (elbow-up).
 # CONFIRMED against the physical RO1 teach pendant, Move -> Joints screen (photo, 2026-07-08):
 #     J0=4.0  J1=-19.5  J2=-113.0  J3=43.5  J4=-268.9  J5=-178.0
-# It equals record_sbot_scene_gs.py's --arm-home-deg *default* today, but we pass it EXPLICITLY so
+# It equals scripts/record_sbot_scene_gs.py's --arm-home-deg *default* today, but we pass it EXPLICITLY so
 # a future edit to that default cannot silently move the hand's start pose (that was the bug: the
 # initial pose was only an overridable default, not pinned).
 ARM_HOME_DEG="4.0 -19.5 -113.0 43.5 -268.9 -178.0"
 
 # ROBOT BASE in the sbot scene world (m) + base yaw (deg). Locates the whole arm (hence the hand).
 # CALIBRATED so the ARM_HOME_DEG gripper starts AT the cable/jack: with the home-relative grasp
-# (record_sbot_scene_gs.py: gripper holds the cable at its HOME orientation and rides the cable's
+# (scripts/record_sbot_scene_gs.py: gripper holds the cable at its HOME orientation and rides the cable's
 # relative rotation, instead of slewing to the plug axis), this makes the frame-0 grasp pose land
 # within ~4deg of ARM_HOME_DEG and the arm stay near home through the insertion. Derived by shifting
 # the v1 base "0.295 -0.45 0.87" by the home-gripper->jack lateral offset [+0.131,+0.344,0].

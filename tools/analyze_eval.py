@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 """Categorize closed-loop VLA eval rollouts into approach/align/insert/seat failure buckets.
 
-Reads each evalrun_v2/ep_XXXX/trace.npz (motion trace from record_sbot_scene_gs.py --policy-server)
+Reads each evalrun_v2/ep_XXXX/trace.npz (motion trace from scripts/record_sbot_scene_gs.py --policy-server)
 and classifies the episode by how far the policy got, using socket-frame insertion depth (y_sock)
 and lateral offset (lat). Success = seated (y_sock reached the seat threshold).
 

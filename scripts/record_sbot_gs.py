@@ -27,7 +27,7 @@ Run (renderer container up with ipc: host; /dev/shm/dal_buffer* are root-owned -
     cd newton-cabling
     uv pip install posix_ipc                                            # one-time
     sudo PYTHONPATH=/home/pandaliza/parallax/data-generator/sim_engine/DalusPySim \
-        .venv/bin/python record_sbot_gs.py --out out_sbot_gs
+        .venv/bin/python scripts/record_sbot_gs.py --out out_sbot_gs
 
     --smoke    render one static home-pose frame and exit (validate registration)
     --dry-run  skip the renderer/SHM entirely (still runs Newton, returns black frames)
@@ -48,7 +48,7 @@ import warp as wp
 
 newton.use_coord_layout_targets = True
 
-sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))  # repo root
 from newton.solvers import SolverVBD  # noqa: E402
 
 from newton_cabling.render.gs_bridge import (  # noqa: E402
@@ -183,7 +183,7 @@ def main() -> None:
 
     os.makedirs(args.out, exist_ok=True)
 
-    # ── build the robot (mirrors record_sbot_smoke.py; visual-only, no contact) ──────
+    # ── build the robot (mirrors scripts/record_sbot_smoke.py; visual-only, no contact) ──────
     builder = new_vbd_builder(gravity=-9.81)
     base_xform = wp.transform(wp.vec3(0.0, 0.0, 0.0), wp.quat_identity())
     handles = add_sbot(builder, base_xform, with_gripper=True)

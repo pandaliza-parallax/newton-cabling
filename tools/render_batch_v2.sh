@@ -4,7 +4,7 @@
 # and the plug trajectory's physics RESET TRANSIENT is trimmed off the start. This removes the
 # grasp-handoff "jerk" (v1's ~13mm/12° one-step action spike, which was the source PPO trajectory's
 # frame0->1 reset settle replayed as a rigid wrist motion). The IK rotation-target order is also
-# corrected (wxyz->xyzw) in record_sbot_scene_gs.py. Everything else matches v1 exactly.
+# corrected (wxyz->xyzw) in scripts/record_sbot_scene_gs.py. Everything else matches v1 exactly.
 #
 # Per episode -> datagen_v2/ep_XXXX/:
 #   image/frame_*.png        FRONT cam, 224x224   (VARIABLE length: grasped insertion only)
@@ -65,7 +65,7 @@ for i in $(seq "$START" $((END - 1))); do
         skip_n=$((skip_n + 1)); continue
     fi
     echo "[batch] rendering $ep -> $out"
-    .venv/bin/python record_sbot_scene_gs.py \
+    .venv/bin/python scripts/record_sbot_scene_gs.py \
         --plug-traj "$traj" \
         --jack-pos $JACK_POS \
         --base-pos $BASE_POS --base-yaw-deg $BASE_YAW_DEG \

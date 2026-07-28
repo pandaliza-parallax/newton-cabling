@@ -12,7 +12,7 @@ poses the jaws but is not a force-closure grip under contact (see
 ``newton_cabling.sim.sbot``).
 
 Requires Newton + a Warp device. Run from the repo root:
-    .venv/bin/python record_sbot_smoke.py
+    .venv/bin/python scripts/record_sbot_smoke.py
 """
 
 import pathlib
@@ -24,7 +24,7 @@ import warp as wp
 
 newton.use_coord_layout_targets = True
 
-sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))  # repo root
 from newton.solvers import SolverVBD  # noqa: E402
 
 from newton_cabling.sim.recording import auto_blueprint, open_rrd_recorder  # noqa: E402

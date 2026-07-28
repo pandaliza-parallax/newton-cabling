@@ -5,7 +5,7 @@ The captured flat/wrist_3_link.ply bakes the whole gripper into it (~36k pts, ex
 x=-0.21 along the tool axis), which double-renders with the 8 synth articulating finger
 splats (the "outer captured gripper + inner synth fingers" doubling). This keeps only the
 wrist side -- points with local x >= --keep-x-above -- and writes a COPY to a new dir; the
-original flat/ is left untouched. Point record_sbot_scene_gs.py at it with --wrist3-ply.
+original flat/ is left untouched. Point scripts/record_sbot_scene_gs.py at it with --wrist3-ply.
 
 The wrist/gripper geometry is blended (no clean gap), so this is approximate: raise the
 threshold toward 0 to strip more gripper (risk clipping the flange), lower it to keep more.

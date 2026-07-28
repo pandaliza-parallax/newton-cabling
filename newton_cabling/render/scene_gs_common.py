@@ -1,7 +1,7 @@
 """Shared scene-render core for the RO1 + ethernet GS renderers.
 
-Everything here was byte-identical across record_sbot_scene_gs.py (the rigid-plug
-replay track) and record_sbot_scene_gs_cable.py (the Newton-simulated cable track),
+Everything here was byte-identical across scripts/record_sbot_scene_gs.py (the rigid-plug
+replay track) and scripts/record_sbot_scene_gs_cable.py (the Newton-simulated cable track),
 which were copy-paste forks. Only their main() differs, so this module holds the
 constants and helpers both drive.
 

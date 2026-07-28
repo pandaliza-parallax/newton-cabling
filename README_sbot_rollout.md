@@ -13,7 +13,7 @@ Output is a stitched multi-camera `.mp4` + per-frame PNGs.
 ```bash
 cd /home/pandaliza/parallax/newton-cabling
 sudo PYTHONPATH=/home/pandaliza/parallax/data-generator/sim_engine/DalusPySim \
-  .venv/bin/python record_sbot_scene_gs.py \
+  .venv/bin/python scripts/record_sbot_scene_gs.py \
     --plug-traj seated_traj/ep_0000/plug_traj.npy \
     --mount --base-yaw-deg 180 --base-pos 0.295 -0.60 1.30 --grasp-rpy 0 -90 0 \
     --gripper-gs-dir /home/pandaliza/parallax/parallax-demo-isaac-lab/assets/sbot_gs/gripper_col \
@@ -42,7 +42,7 @@ sudo here is **not** passwordless — run it yourself.
 
 ## How it works
 
-`record_sbot_scene_gs.py`:
+`scripts/record_sbot_scene_gs.py`:
 1. loads `plug_traj.npy` `(T,7)` = per-step `[pos3, quat4 wxyz]` plug pose in the **socket frame**;
 2. builds the RO1 (+ AG-145 gripper) in Newton, solves **IK** each frame so the grasp point tracks
    the mapped plug pose (`newton.ik`, position+rotation objectives on `wrist_3`);
@@ -57,7 +57,7 @@ sudo here is **not** passwordless — run it yourself.
 ## Files that matter
 
 **Entry point**
-- `record_sbot_scene_gs.py` — the render/IK driver above.
+- `scripts/record_sbot_scene_gs.py` — the render/IK driver above.
 
 **Render / sim library**
 - `newton_cabling/render/gs_bridge.py` — `NewtonGSClient` (SHM to the renderer),
@@ -78,7 +78,7 @@ sudo here is **not** passwordless — run it yourself.
   recolored gripper in `.../sbot_gs/gripper_col/`.
 - Helpers: `tools/recolor_gripper.py`, `tools/strip_arm_sh.py`.
 
-**Isolated debug viz** (no arm/IK): `viz_jack_connector.py` — jack + connector on the table only.
+**Isolated debug viz** (no arm/IK): `scripts/viz_jack_connector.py` — jack + connector on the table only.
 
 ---
 

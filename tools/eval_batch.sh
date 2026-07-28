@@ -25,7 +25,7 @@ for i in $(seq "$START" $((END - 1))); do
     [ -f "$traj" ] || continue
     rm -rf "$out"    # clear stale frames/results from previous runs (episodes can be shorter now)
     echo "[eval] $ep ..."
-    .venv/bin/python record_sbot_scene_gs.py \
+    .venv/bin/python scripts/record_sbot_scene_gs.py \
         --plug-traj "$traj" \
         --jack-pos 0.295 -0.876 0.835 \
         --base-pos 0.295 -0.45 0.87 --base-yaw-deg 0 \

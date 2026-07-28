@@ -4,10 +4,10 @@
 Reads the flat DC-only finger plys and rewrites only f_dc so the displayed colour
 (0.5 + SH_C0*f_dc) matches a target (a real AG-145 is matte near-black, not the current
 flat 0.2 gray). Writes to a NEW dir; the working flat/ plys are left untouched. Point the
-renderer at the output with record_sbot_scene_gs.py --gripper-gs-dir <out>.
+renderer at the output with scripts/record_sbot_scene_gs.py --gripper-gs-dir <out>.
 
     python tools/recolor_gripper.py --body 0.06 --tip 0.11
-    # then: record_sbot_scene_gs.py --gripper-gs-dir .../sbot_gs/gripper_col ...
+    # then: scripts/record_sbot_scene_gs.py --gripper-gs-dir .../sbot_gs/gripper_col ...
     # (restart the renderer first -- it caches splats per SETUP and won't reload same-count files)
 """
 from __future__ import annotations

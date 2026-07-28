@@ -3,7 +3,7 @@
 Rolls out the learned ActorCritic in ConnectorVecEnv (pure physics), records each env's
 plug pose in ITS socket frame per step -- the same (T,7) [pos3, quat4 wxyz] format as
 record_policy.py --eval-vla's plug_traj.npy -- and saves every episode that seats. Feed
-a saved file straight into record_sbot_scene_gs.py --plug-traj.
+a saved file straight into scripts/record_sbot_scene_gs.py --plug-traj.
 
     uv run --extra sim python rl/gen_seated_traj.py --out seated_traj --envs 16 --rounds 6
 
@@ -32,7 +32,7 @@ DEV = "cuda:0"
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--checkpoint", default="rl/runs/extend/best_model.pt")
-    ap.add_argument("--out", default="seated_traj")
+    ap.add_argument("--out", default="../data/vla_train/seated_traj")
     ap.add_argument("--asset", default="rj45", choices=["rj45", "cad_rj45", "cad_rj45_real"])
     ap.add_argument("--random-easy", action="store_true",
                     help="6-DOF random_easy task (obs=12, act=6) — REQUIRED for the cad_* checkpoints")

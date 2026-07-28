@@ -9,7 +9,7 @@ So this exporter records the **wrist/EEF** pose as the primary channel -- it is 
 policy commands and what the renderer must replay -- plus the Newton-tracked connector
 pose as a secondary channel, so the plug splat can be drawn at its TRUE physics pose
 instead of being inferred from a cord-axis estimate. Feed the result into
-``record_sbot_scene_gs.py --eef-traj`` (see tools/render_batch_v4.sh).
+``scripts/record_sbot_scene_gs.py --eef-traj`` (see tools/render_batch_v4.sh).
 
     .venv/bin/python rl/gen_cable_traj.py --checkpoint rl/runs/cable_v3/best_model.pt \
         --out cable_traj --envs 64 --rounds 8 --stage 4 --cable-tilt 8
@@ -56,7 +56,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--checkpoint", default="rl/runs/cable_v3/best_model.pt",
                     help="trained cable PPO checkpoint; omit to use the scripted servo teacher")
-    ap.add_argument("--out", default="cable_traj")
+    ap.add_argument("--out", default="../data/vla_train/cable_traj")
     ap.add_argument("--envs", type=int, default=64)
     ap.add_argument("--rounds", type=int, default=8, help="episodes = envs * rounds (before filtering)")
     ap.add_argument("--stage", type=int, default=4, help="curriculum stage (4 = hardest)")

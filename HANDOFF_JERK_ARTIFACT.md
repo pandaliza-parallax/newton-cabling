@@ -18,7 +18,7 @@ policy's raw commanded actions (`trace.npz` `drot`), while surrounding steps are
 
 ## Root cause: the data taught it
 
-The data generator (`record_sbot_scene_gs.py --plug-traj ... --dump`) builds each episode as
+The data generator (`scripts/record_sbot_scene_gs.py --plug-traj ... --dump`) builds each episode as
 **hold (12) → approach (45) → insertion (~50–200)**. The approach eases the arm from home to
 `q_grasp` — an IK solution for the plug's start pose solved ONCE (48 iters from the home
 seed). The insertion then re-solves IK **per frame** against the trajectory targets. Two
@@ -81,4 +81,4 @@ EOF
 
 Related: the eval harness's grasp is a proximity-gated (<3 cm) rigid LATCH (no snap), so
 post-grasp motion in eval reflects the policy's commands, not harness artifacts — see
-`--policy-server` in `record_sbot_scene_gs.py`.
+`--policy-server` in `scripts/record_sbot_scene_gs.py`.

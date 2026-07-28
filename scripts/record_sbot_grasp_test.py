@@ -18,7 +18,7 @@ test) | 2-4s +-5 deg base slew (inertial shake) | 4-5s hold. PASS = the plug tra
 hand (relative drift < 5mm) instead of falling.
 
 Run from the repo root (newton .venv):
-    .venv/bin/python record_sbot_grasp_test.py
+    .venv/bin/python scripts/record_sbot_grasp_test.py
 """
 
 from __future__ import annotations
@@ -32,7 +32,7 @@ import numpy as np
 import warp as wp
 from newton.solvers import SolverVBD
 
-sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))  # repo root
 from newton_cabling.connector import cad_rj45_connector  # noqa: E402
 from newton_cabling.sim.recording import auto_blueprint, open_rrd_recorder  # noqa: E402
 from newton_cabling.sim.safe_vbd import finalize_for_vbd, new_vbd_builder  # noqa: E402

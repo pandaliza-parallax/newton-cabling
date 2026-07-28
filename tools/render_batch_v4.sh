@@ -8,7 +8,7 @@
 #
 # INPUT  : cable_traj/ep_XXXX/{eef_traj,conn_traj}.npy  (from rl/gen_cable_traj.py)
 #          (T,7) [pos3, quat4 wxyz], FULLY seat-relative -- see gen_cable_traj.py.
-# RENDER : record_sbot_scene_gs_cable.py --eef-traj (fork of the v3 renderer; v3 untouched).
+# RENDER : scripts/record_sbot_scene_gs_cable.py --eef-traj (fork of the v3 renderer; v3 untouched).
 #          --eef-rpy 180 0 0 (the renderer default) undoes cable_env's seat frame (180deg-about-x
 #          flipped from world) so the arm reaches every frame (IK err ~0), the wrist clears the
 #          table, and the dangling connector sits below the hand as in cable_env. Verify the
@@ -96,7 +96,7 @@ mkdir -p "$OUTROOT"
   echo "datagen_v4 generated (cable PPO track)"
   echo "script      : tools/render_batch_v4.sh   range [$START,$END)"
   echo "traj source : $TRAJROOT/ep_XXXX/eef_traj.npy  (rl/gen_cable_traj.py)"
-  echo "renderer    : record_sbot_scene_gs_cable.py --eef-traj  (eef-rpy $EEF_RPY)"
+  echo "renderer    : scripts/record_sbot_scene_gs_cable.py --eef-traj  (eef-rpy $EEF_RPY)"
   echo "gripper gs  : $GRIPPER_DIR"
   echo "wrist3 ply  : $WRIST3_PLY"
   echo "sbot usd    : $SBOT_USD"
@@ -115,7 +115,7 @@ for i in $(seq "$START" $((END - 1))); do
         skip_n=$((skip_n + 1)); continue
     fi
     echo "[batch] rendering $ep -> $out"
-    .venv/bin/python record_sbot_scene_gs_cable.py \
+    .venv/bin/python scripts/record_sbot_scene_gs_cable.py \
         --eef-traj "$traj" --eef-rpy $EEF_RPY \
         --jack-pos $JACK_POS --jack-align-rpy $JACK_ALIGN_RPY --conn-rpy $CONN_RPY \
         --connector-ply $PLUG_HEAD --connector-tail-ply $PLUG_TAIL \

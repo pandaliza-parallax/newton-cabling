@@ -1,5 +1,5 @@
 """Record an ArmConnectorVecEnv rollout under a trained policy to a rerun .rrd (physics, for
-viewing the RO1 insert the plug). Mirrors record_sbot_grasp_test.py's rerun logging.
+viewing the RO1 insert the plug). Mirrors scripts/record_sbot_grasp_test.py's rerun logging.
 
     .venv/bin/python rl/record_arm_policy.py --checkpoint rl/runs/arm_v2/best_model.pt \
         --envs 4 --stage 0 --steps 200 --out arm_rollout

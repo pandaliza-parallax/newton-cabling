@@ -66,7 +66,7 @@ def main():
     tr = np.load(f"{args.run}/{name}/trace.npz")
     if "plug_s" not in tr.files:
         raise SystemExit(f"{args.run}/{name}/trace.npz has no plug_s/plug_sq — re-run this episode "
-                         f"with the updated record_sbot_scene_gs.py to record orientation.")
+                         f"with the updated scripts/record_sbot_scene_gs.py to record orientation.")
     po_p, po_r = np.asarray(tr["plug_s"]) * 1000.0, rotvec_deg(tr["plug_sq"])
 
     fig, axes = plt.subplots(2, 3, figsize=(13, 6), facecolor=SURFACE)

@@ -1,30 +1,30 @@
-"""RO1 arm + ethernet scene rendered for the CABLE track (the v4 datagen renderer).
+"""StandardBots RO1 arm + the ethernet/table scene, rendered through DalusPySim's
+Gaussian-Splat renderer (the "combined scene").
 
-The cable counterpart to record_sbot_scene_gs.py. That one replays a rigid plug
-trajectory and INFERS the gripper pose from it; this one runs the opposite
-direction -- the gripper pose is the recorded input (--eef-traj, from a PPO
-rollout via rl/gen_cable_traj.py), IK drives the arm from it, and the connector
-is drawn at its OWN Newton-simulated pose (--conn-traj / face_traj), not rigidly
-attached to the hand. Nothing about the gripper is inferred.
+Extends scripts/record_sbot_gs.py: the seven arm-link splats are driven by the Newton sbot sim
+(as before), and three scene splats are added --
 
-So unlike the base renderer, the connector here IS a physically simulated body:
-its pose comes from the cable sim, which is why it deflects and swings relative
-to the jaws during insertion.
+  * table  -- static, placed *absolutely* (render_config.yml convention, top at z~0.886)
+  * jack   -- static ethernet port, placed on the table top (origin-centred CAD splat)
+  * connector wire -- rides the gripper (wrist_3_link) so the arm visibly carries it
 
-Splats: table, jack, connector head + tail, and the 15 robot links (7 arm +
-8 gripper) -- 19 total. The splat COUNT is what the renderer caches, so restart
-it whenever that changes (and after any splat FILE swap, which the count misses).
+This is a render-only composition: the jack/connector are NOT in the Newton physics (no
+contact / grasp). The connector follows wrist_3's pose rigidly via gs_bridge.place_on_body
+(recentred by its native centroid, plus a tunable grasp offset/rotation so it seats in the
+jaws). The AG-145 gripper now renders too -- its 8 finger links are dynamic bodies with
+synthesized CAD splats, so the jaws open/close with the arm.
 
-Calibration lives in newton_cabling/render/scene_gs_common.py; the track-specific
-constants are --eef-rpy 180 0 0 (undoes cable_env's 180-about-x seat flip) and
---jack-align-rpy -90 0 0 (faces the jack mouth toward the arm).
+Everything is in metres, Z-up -- arm links ~0.1-0.7 m, jack ~2 cm, table ~1.2 m -- so no
+scaling. Placement (table_pos / jack_pos / grasp_offset / camera) is approximate by design:
+validate the wiring with --dry-run, then tune the offsets by eyeballing rendered frames,
+exactly like tools/gs_probe.py.
 
-Run:
-    sudo TRAJROOT=$PWD/cable_traj bash tools/render_batch_v4.sh 0 1
-    # or directly, with --dry-run to check IK without the GS container:
-    .venv/bin/python record_sbot_scene_gs_cable.py \
-        --eef-traj cable_traj/ep_0000/eef_traj.npy --eef-rpy 180 0 0 \
-        --grasped-only --dry-run --out /tmp/check
+Run (renderer container up, ipc: host; SHM root-owned -> sudo):
+    cd newton-cabling
+    sudo PYTHONPATH=/home/pandaliza/parallax/data-generator/sim_engine/DalusPySim \
+        .venv/bin/python scripts/record_sbot_scene_gs.py --out out_sbot_scene
+    --smoke    one static home-pose frame (tune placement fast)
+    --dry-run  skip renderer/SHM (still runs Newton, black frames)
 """
 
 from __future__ import annotations
@@ -41,7 +41,7 @@ import warp as wp
 
 newton.use_coord_layout_targets = True
 
-sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))  # repo root
 from newton.solvers import SolverVBD  # noqa: E402
 
 from newton_cabling.render.gs_bridge import (  # noqa: E402
@@ -112,17 +112,8 @@ def main() -> None:
     # scene assets (host paths; rewritten to container paths automatically)
     ap.add_argument("--table-ply", default=f"{HOST_GSVLA}/objects/table/splat.ply")
     ap.add_argument("--jack-ply", default=f"{HOST_GSVLA}/objects/ethernet/cad_jack_registered.ply")
-    ap.add_argument("--connector-ply", default=f"{HOST_GSVLA}/objects/ethernet/cropped_plug_head.ply",
-                    help="connector HEAD splat (RJ45 plug). Default = cropped_plug_head.ply (front "
-                         "half of cad_plug_registered). Placed at the plug FACE pose.")
-    ap.add_argument("--connector-tail-ply",
-                    default=f"{HOST_GSVLA}/objects/ethernet/cropped_plug_tail_longer.ply",
-                    help="connector TAIL splat (boot / cable-exit). Shares the plug frame, so it rides "
-                         "the SAME connector pose+anchor as the head -> together they reconstruct the "
-                         "plug. Default is the LONGER tail (z -12.2..8.0 = 20.2mm vs the original "
-                         "cropped_plug_tail.ply's -3.4..8.0 = 11.4mm): same origin/cross-section, just "
-                         "8.8mm more cable, which shrinks the empty gripper->plug gap 37.5mm -> 28.7mm. "
-                         "Pass 'none' to render head only.")
+    ap.add_argument("--connector-ply", default=f"{HOST_GSVLA}/objects/ethernet/cad_plug_registered.ply",
+                    help="connector/plug splat (default = the eval's calibrated plug, matches ep_0000)")
     ap.add_argument("--gripper-gs-dir", default=HOST_GRIPPER_CUT,
                     help="dir for the 8 gripper FINGER splats. DEFAULT is the SH-cut fingers (gripper_cut). "
                          "Pass HOST_SBOT_GS's flat dir for the old synth gripper. FILES differ from a prior "
@@ -203,27 +194,6 @@ def main() -> None:
                          "0.036 = plug fully enclosed; >0.07 = plug floats clear of the jaws.")
     ap.add_argument("--grip", choices=["closed", "open", "cycle"], default="closed",
                     help="gripper jaws: held closed (default), held open, or cycled open/closed")
-    # CABLE replay (rl/gen_cable_traj.py): the EEF is RECORDED and the connector follows its own
-    # simulated pose -- the cable PPO direction. Mutually exclusive with --plug-traj.
-    ap.add_argument("--eef-traj", default=None,
-                    help="ep_XXXX/eef_traj.npy from rl/gen_cable_traj.py: (T,7) [pos3, quat4 wxyz] "
-                         "wrist_3_link pose, positions SEAT-relative (same anchoring as --plug-traj). "
-                         "The arm IKs to it directly -- none of the --grasp-along-cord / "
-                         "--insert-hold-home-rot plug->gripper inference applies.")
-    ap.add_argument("--conn-traj", default=None,
-                    help="--eef-traj: connector poses for the plug splat. Default = face_traj.npy "
-                         "beside the eef traj (the plug FACE; seated quat ~ identity == v3 plug "
-                         "convention, so conn_align/anchor apply as-is). Do NOT point this at "
-                         "conn_traj.npy (the front-rod body) -- it's -90deg-about-x off and rotates "
-                         "the plug splat 90deg. The plug draws at its TRUE Newton pose (deflects up "
-                         "to ~19mm/23deg from the hand during insertion).")
-    ap.add_argument("--eef-rpy", type=float, nargs=3, default=[180.0, 0.0, 0.0], metavar=("R", "P", "Y"),
-                    help="--eef-traj: constant axis-convention rotation between cable_env's seat "
-                         "frame and the jack obj-frame (deg). seat_R = jqw . eef_rpy maps the whole "
-                         "seat-relative trajectory into the scene. Default 180 0 0 undoes cable_env's "
-                         "seat frame (180deg-about-x flipped from world) -> arm reaches every frame "
-                         "(IK err ~0), wrist clears the table, connector approaches from the arm side. "
-                         "The [calib] line reports reach + min wrist-z so you can confirm.")
     # policy-rollout replay: drive the connector (and arm via IK) along a recorded plug trajectory
     ap.add_argument("--plug-traj", default=None,
                     help="(T,7) .npy of [pos3,quat4(wxyz)] plug poses in the SOCKET frame, from "
@@ -422,7 +392,7 @@ def main() -> None:
 
     os.makedirs(args.out, exist_ok=True)
 
-    # ── robot (mirrors record_sbot_gs.py; visual-only) ──────────────────────────────
+    # ── robot (mirrors scripts/record_sbot_gs.py; visual-only) ──────────────────────────────
     builder = new_vbd_builder(gravity=-9.81)
     th = math.radians(args.base_yaw_deg) / 2.0
     base_xform = wp.transform(wp.vec3(*args.base_pos), wp.quat(0.0, 0.0, math.sin(th), math.cos(th)))
@@ -512,9 +482,6 @@ def main() -> None:
             return args.wrist3_ply
         return f"{(grip_dir if 'finger' in n else HOST_SBOT_GS)}/{n}.ply"
 
-    # connector TAIL (boot) splat: shares the plug frame with the head -> rides the same pose+anchor.
-    _tail = args.connector_tail_ply if str(args.connector_tail_ply).lower() not in ("none", "") else None
-
     gonly = [n for n in LINK_SPLATS if "finger" in n]          # the 8 gripper finger links
     dummy_bg = None
     if args.gripper_only:                                       # DEBUG: only the gripper splats
@@ -535,8 +502,6 @@ def main() -> None:
         print(f"[scene] GRIPPER-ONLY: {len(gonly)} finger splats + invisible bg (all fingers articulate)")
     else:
         obj_plys = [host_to_container(p) for p in (args.table_ply, args.jack_ply, args.connector_ply)]
-        if _tail:                                              # connector TAIL at index 3 (before links)
-            obj_plys.append(host_to_container(_tail))
         obj_plys += [host_to_container(_link_ply(n)) for n in LINK_SPLATS]
 
     ped_pose = None
@@ -563,8 +528,6 @@ def main() -> None:
             ride_pose(bq[wrist3][:3], newton_pose(bq, wrist3)[1],               # connector (in jaws)
                       align=grasp_align, centroid=cord_c, offset=grasp_offset),
         ]
-        if _tail:                                                              # tail rides the connector pose (index 3)
-            poses.append(poses[2])
         poses += [
             static_links[n] if n in static_links else newton_pose(bq, dyn_bodies[n])
             for n in LINK_SPLATS
@@ -708,7 +671,7 @@ def main() -> None:
     print(f"[scene] wrist_3 home @ {np.round(bq0[wrist3][:3], 3)}  (place jack/connector near here)")
     print(f"[scene] frame center={np.round(center, 3)} diag={diag:.3f} eye={np.round(eye, 3)}")
     print(
-        f"[scene] {len(obj_plys)} splats: table, jack, connector{'+tail' if _tail else ''} "
+        f"[scene] {len(obj_plys)} splats: table, jack, connector "
         f"+ {len(LINK_SPLATS)} robot links (7 arm + 8 gripper)"
     )
     print(f"[scene] jack @ {np.round(jack_pos, 3)} (table centre top); table top z={tbl_top:.3f}")
@@ -762,121 +725,67 @@ def main() -> None:
         gl.end_frame()
         return composite_lr(gl.get_frame().numpy(), gs_u8)
 
-    # ── CABLE replay: the EEF follows a recorded gripper trajectory, the connector follows its
-    # OWN recorded (Newton-simulated) pose. This is the cable PPO direction --
-    #     gripper pose (policy) -> cable physics -> plug pose
-    # -- the inverse of --plug-traj, which infers the gripper from the plug via the cord-axis
-    # heuristic below because the rigid track had no simulated cable. Nothing is inferred here.
-    if args.plug_traj or args.eef_traj:
-        if args.eef_traj:
-            eef_t = np.load(args.eef_traj)                           # (T,7) [pos3, quat4 wxyz], SEAT frame
-            # The connector splat tracks the plug FACE (face_traj), NOT the front-rod body (conn_traj):
-            # the rod body sits -90deg-about-x from the plug frame, so feeding conn_traj fights the v3
-            # plug-splat calibration (conn_align -90 0 0) and rotates the plug 90deg. face_traj has
-            # seated quat ~ identity == v3's plug_traj convention, so v3's conn_align/anchor apply as-is.
-            _ct = args.conn_traj or os.path.join(os.path.dirname(args.eef_traj), "face_traj.npy")
-            conn_t = np.load(_ct)
-            if len(conn_t) != len(eef_t):
-                raise SystemExit(f"eef_traj ({len(eef_t)}) and {os.path.basename(_ct)} "
-                                 f"({len(conn_t)}) length mismatch")
-            jqw = list(jack_q)
-            conn_align = euler_deg_to_quat_wxyz(*args.conn_rpy)      # plug-splat calibration (-90 0 0)
-            conn_anchor = np.array(args.conn_anchor, float)
-            # The saved trajectory is SEAT-relative (cable_env's seat frame, seat_q ~ identity).
-            # seat_R is the world orientation of that seat frame in THIS scene = jqw composed with
-            # a constant axis-convention calibration --eef-rpy (cable_env's seat axes vs the jack
-            # obj-frame). Both the wrist and the connector are mapped by the SAME rigid seat
-            # transform (jack_pos, seat_R), so cable_env's true wrist<->connector grasp geometry is
-            # preserved. Solve --eef-rpy so the frame-0 arm sits near home (see [calib] print).
-            eef_align = euler_deg_to_quat_wxyz(*args.eef_rpy)
-            seat_R = quat_mul_wxyz(list(jqw), list(eef_align))
-            _to_world = lambda s: (np.asarray(jack_pos, float) + quat_rotate_wxyz(seat_R, s[:3]),
-                                   quat_mul_wxyz(list(seat_R), [float(x) for x in s[3:7]]))
-            # connector SPLAT poses: physical orientation seat_R.q_saved, then conn_align for the
-            # splat's local axes (same body-frame calibration the plug splat uses).
-            conn_world = [(p, quat_mul_wxyz(list(q), conn_align)) for p, q in map(_to_world, conn_t)]
-            # wrist_3_link poses -> IK objectives. The position objective drives the GRASP POINT
-            # (wrist3 + grasp_offset) so target = wrist_pos + R.grasp_offset makes wrist3 land at
-            # the recorded wrist. cable_env's WRIST_BODY and GRIPPER_LINK are both wrist_3_link.
-            _eef_w = [_to_world(s) for s in eef_t]
-            ik_tgt = [np.asarray(p, float) + quat_rotate_wxyz(q, grasp_offset) for p, q in _eef_w]
-            _eef_grip_q = [quat_mul_wxyz(list(q), list(grasp_align)) for _, q in _eef_w]
-            cord_world = np.zeros(3)                                 # unused in eef mode (nothing inferred)
-            # ── calibration diagnostic: the arm should REACH every frame (IK err ~0) and the wrist
-            # should clear the table. eef_rpy defaults to 180 0 0, which undoes cable_env's seat
-            # frame (it is 180deg-about-x flipped from world; seat_quat_xyzw ~ [1,0,0,0] = 180x),
-            # putting the dangling connector BELOW the wrist as in cable_env. The prior "match
-            # frame-0 wrist to ARM_HOME orientation" heuristic was wrong -- cable_env's start grasp
-            # is not the renderer's arm home -- and forced a bad rotation (arm 247deg off, unreachable).
-            _wz = min(p[2] for p in (pp for pp, _ in _eef_w))
-            print(f"[calib] eef_rpy={args.eef_rpy}  wrist_start={np.round(ik_tgt[0],3)} "
-                  f"(reach {np.linalg.norm(ik_tgt[0]-np.asarray(args.base_pos)):.3f}m)  "
-                  f"min wrist z over traj={_wz:.3f} (table_top~0.785)  "
-                  f"conn_start={np.round(conn_world[0][0],3)} seat={np.round(conn_world[-1][0],3)}")
-            print(f"[replay] CABLE mode: {len(conn_world)} frames from {args.eef_traj}; "
-                  f"connector at its OWN recorded pose (no cord-axis inference); "
-                  f"arm IK {'OFF' if args.no_arm_ik else 'ON'}")
-        # ── policy-rollout replay: connector (+ arm via IK) follows a recorded plug trajectory ──
-        elif args.plug_traj:
-            traj = np.load(args.plug_traj)                          # (T,7) [pos3, quat4 wxyz] in SOCKET frame
-            if args.trim_settle_mm > 0.0 and len(traj) > 2:        # v2: drop the physics reset transient at the
-                step_mm = 1000.0 * np.linalg.norm(np.diff(traj[:, :3], axis=0), axis=1)   # trajectory start. The
-                qn = traj[:, 3:] / (np.linalg.norm(traj[:, 3:], axis=1, keepdims=True) + 1e-9)   # plug ORIENTATION
-                step_deg = 2.0 * np.degrees(np.arccos(                                    # settles a few frames
-                    np.abs(np.sum(qn[:-1] * qn[1:], axis=1)).clip(-1.0, 1.0)))            # after its position, so
-                k = 0                                                                     # gate on BOTH channels
-                while k < len(step_mm) and (step_mm[k] > args.trim_settle_mm or step_deg[k] > args.trim_settle_deg):
-                    k += 1
-                if 0 < k < len(traj) - 1:                          # keep >=2 frames; leave clean trajectories alone
-                    settled_y_mm = float(traj[k, 1] * 1000.0)      # settled-start depth (socket mouth=0, +=inside)
-                    if settled_y_mm > -args.start_min_outside_mm:  # settled AT/INSIDE the mouth -> keep it OUTSIDE:
-                        p0, pk = traj[0, :3], traj[k, :3]          # replace the reset JERK with a smooth approach
-                        q0 = np.asarray(traj[0, 3:]) / (np.linalg.norm(traj[0, 3:]) + 1e-9)   # from the OUTSIDE spawn
-                        qk = np.asarray(traj[k, 3:]) / (np.linalg.norm(traj[k, 3:]) + 1e-9)   # (traj[0]) to traj[k]
-                        dist_mm = float(np.linalg.norm(pk - p0) * 1000.0)
-                        drot = 2.0 * math.degrees(math.acos(min(1.0, abs(float(np.dot(q0, qk))))))
-                        n = max(2, int(np.ceil(max(dist_mm / args.trim_settle_mm, drot / max(args.trim_settle_deg, 1e-6)))))
-                        appr = np.zeros((n, 7), traj.dtype)
-                        for i in range(n):
-                            a = i / n                              # 0 .. (n-1)/n  (traj[k] follows as first kept frame)
-                            appr[i, :3] = (1.0 - a) * p0 + a * pk
-                            qi = (1.0 - a) * q0 + a * qk
-                            appr[i, 3:] = qi / (np.linalg.norm(qi) + 1e-9)
-                        traj = np.concatenate([appr, traj[k:]], axis=0)
-                        print(f"[replay] settled start at/inside mouth (y={settled_y_mm:+.1f}mm): synthesized "
-                              f"{n}-frame smooth approach from y={p0[1] * 1000:+.1f}mm (OUTSIDE) instead of "
-                              f"dropping -> plug STARTS OUTSIDE the jack")
-                    else:
-                        print(f"[replay] trim reset transient: dropping {k} leading frame(s) "
-                              f"(|dpos| {np.round(step_mm[:k], 1)}mm / |drot| {np.round(step_deg[:k], 1)}deg exceed "
-                              f"{args.trim_settle_mm}mm / {args.trim_settle_deg}deg) -> settled grasp start (y={settled_y_mm:+.1f}mm)")
-                        traj = traj[k:]
-            jqw = list(jack_q)                                      # jack world orientation (wxyz)
-            conn_align = euler_deg_to_quat_wxyz(*args.conn_rpy)     # eval plug-splat calibration (-90 0 0)
-            conn_anchor = np.array(args.conn_anchor, float)        # plug mating-face anchor (= eval --plug-anchor)
-            # socket-frame plug pose -> sbot-scene world: place the recorded insertion at the jack
-            conn_world = [(np.asarray(jack_pos, float) + quat_rotate_wxyz(jqw, s[:3]),
-                           quat_mul_wxyz(quat_mul_wxyz(jqw, [float(x) for x in s[3:7]]), conn_align)) for s in traj]
-            # --grasp-along-cord: the CORD axis, taken EMPIRICALLY from the trajectory itself (the
-            # insertion advance direction, head-ward, in world) -- no quat-convention assumptions.
-            # The HAND's IK targets shift back along it by `along` (jaws land that far behind the
-            # plug's anchor, toward the cable end); the plug still DRAWS at conn_world unchanged.
-            cord_world = quat_rotate_wxyz(jqw, (traj[-1, :3] - traj[0, :3]))
-            cord_world = np.asarray(cord_world, float)
-            cord_world /= np.linalg.norm(cord_world) + 1e-9
-            ik_tgt = [np.asarray(cp, float) - args.grasp_along_cord * cord_world for cp, _ in conn_world]
-            if args.stop_after_seat is not None:                   # drop the dead post-seat tail
-                seated = traj[:, 1] >= 0.011                       # within 0.8mm of full depth (11.8mm)
-                if seated.any():
-                    n_keep = min(len(conn_world), int(np.argmax(seated)) + args.stop_after_seat + 1)
-                    conn_world, ik_tgt = conn_world[:n_keep], ik_tgt[:n_keep]
-                    print(f"[replay] stop-after-seat: seat at traj frame {int(np.argmax(seated))}, "
-                          f"rendering {n_keep}/{len(traj)} insertion frames")
-            print(f"[replay] {len(conn_world)} plug poses from {args.plug_traj}; connector at jack {np.round(jack_pos, 3)}; "
-                  f"arm IK {'OFF' if args.no_arm_ik else 'ON'}")
-            if args.grasp_along_cord:
-                print(f"[replay] along-cord {args.grasp_along_cord:+.3f}m: cord axis (world) = "
-                      f"{np.round(cord_world, 2)}; hand IK targets shifted toward the cable end")
+    # ── policy-rollout replay: connector (+ arm via IK) follows a recorded plug trajectory ──
+    if args.plug_traj:
+        traj = np.load(args.plug_traj)                          # (T,7) [pos3, quat4 wxyz] in SOCKET frame
+        if args.trim_settle_mm > 0.0 and len(traj) > 2:        # v2: drop the physics reset transient at the
+            step_mm = 1000.0 * np.linalg.norm(np.diff(traj[:, :3], axis=0), axis=1)   # trajectory start. The
+            qn = traj[:, 3:] / (np.linalg.norm(traj[:, 3:], axis=1, keepdims=True) + 1e-9)   # plug ORIENTATION
+            step_deg = 2.0 * np.degrees(np.arccos(                                    # settles a few frames
+                np.abs(np.sum(qn[:-1] * qn[1:], axis=1)).clip(-1.0, 1.0)))            # after its position, so
+            k = 0                                                                     # gate on BOTH channels
+            while k < len(step_mm) and (step_mm[k] > args.trim_settle_mm or step_deg[k] > args.trim_settle_deg):
+                k += 1
+            if 0 < k < len(traj) - 1:                          # keep >=2 frames; leave clean trajectories alone
+                settled_y_mm = float(traj[k, 1] * 1000.0)      # settled-start depth (socket mouth=0, +=inside)
+                if settled_y_mm > -args.start_min_outside_mm:  # settled AT/INSIDE the mouth -> keep it OUTSIDE:
+                    p0, pk = traj[0, :3], traj[k, :3]          # replace the reset JERK with a smooth approach
+                    q0 = np.asarray(traj[0, 3:]) / (np.linalg.norm(traj[0, 3:]) + 1e-9)   # from the OUTSIDE spawn
+                    qk = np.asarray(traj[k, 3:]) / (np.linalg.norm(traj[k, 3:]) + 1e-9)   # (traj[0]) to traj[k]
+                    dist_mm = float(np.linalg.norm(pk - p0) * 1000.0)
+                    drot = 2.0 * math.degrees(math.acos(min(1.0, abs(float(np.dot(q0, qk))))))
+                    n = max(2, int(np.ceil(max(dist_mm / args.trim_settle_mm, drot / max(args.trim_settle_deg, 1e-6)))))
+                    appr = np.zeros((n, 7), traj.dtype)
+                    for i in range(n):
+                        a = i / n                              # 0 .. (n-1)/n  (traj[k] follows as first kept frame)
+                        appr[i, :3] = (1.0 - a) * p0 + a * pk
+                        qi = (1.0 - a) * q0 + a * qk
+                        appr[i, 3:] = qi / (np.linalg.norm(qi) + 1e-9)
+                    traj = np.concatenate([appr, traj[k:]], axis=0)
+                    print(f"[replay] settled start at/inside mouth (y={settled_y_mm:+.1f}mm): synthesized "
+                          f"{n}-frame smooth approach from y={p0[1] * 1000:+.1f}mm (OUTSIDE) instead of "
+                          f"dropping -> plug STARTS OUTSIDE the jack")
+                else:
+                    print(f"[replay] trim reset transient: dropping {k} leading frame(s) "
+                          f"(|dpos| {np.round(step_mm[:k], 1)}mm / |drot| {np.round(step_deg[:k], 1)}deg exceed "
+                          f"{args.trim_settle_mm}mm / {args.trim_settle_deg}deg) -> settled grasp start (y={settled_y_mm:+.1f}mm)")
+                    traj = traj[k:]
+        jqw = list(jack_q)                                      # jack world orientation (wxyz)
+        conn_align = euler_deg_to_quat_wxyz(*args.conn_rpy)     # eval plug-splat calibration (-90 0 0)
+        conn_anchor = np.array(args.conn_anchor, float)        # plug mating-face anchor (= eval --plug-anchor)
+        # socket-frame plug pose -> sbot-scene world: place the recorded insertion at the jack
+        conn_world = [(np.asarray(jack_pos, float) + quat_rotate_wxyz(jqw, s[:3]),
+                       quat_mul_wxyz(quat_mul_wxyz(jqw, [float(x) for x in s[3:7]]), conn_align)) for s in traj]
+        # --grasp-along-cord: the CORD axis, taken EMPIRICALLY from the trajectory itself (the
+        # insertion advance direction, head-ward, in world) -- no quat-convention assumptions.
+        # The HAND's IK targets shift back along it by `along` (jaws land that far behind the
+        # plug's anchor, toward the cable end); the plug still DRAWS at conn_world unchanged.
+        cord_world = quat_rotate_wxyz(jqw, (traj[-1, :3] - traj[0, :3]))
+        cord_world = np.asarray(cord_world, float)
+        cord_world /= np.linalg.norm(cord_world) + 1e-9
+        ik_tgt = [np.asarray(cp, float) - args.grasp_along_cord * cord_world for cp, _ in conn_world]
+        if args.stop_after_seat is not None:                   # drop the dead post-seat tail
+            seated = traj[:, 1] >= 0.011                       # within 0.8mm of full depth (11.8mm)
+            if seated.any():
+                n_keep = min(len(conn_world), int(np.argmax(seated)) + args.stop_after_seat + 1)
+                conn_world, ik_tgt = conn_world[:n_keep], ik_tgt[:n_keep]
+                print(f"[replay] stop-after-seat: seat at traj frame {int(np.argmax(seated))}, "
+                      f"rendering {n_keep}/{len(traj)} insertion frames")
+        print(f"[replay] {len(conn_world)} plug poses from {args.plug_traj}; connector at jack {np.round(jack_pos, 3)}; "
+              f"arm IK {'OFF' if args.no_arm_ik else 'ON'}")
+        if args.grasp_along_cord:
+            print(f"[replay] along-cord {args.grasp_along_cord:+.3f}m: cord axis (world) = "
+                  f"{np.round(cord_world, 2)}; hand IK targets shifted toward the cable end")
 
         ik_solver = pos_obj = rot_obj = joint_q_ik = None
         arm_coords = list(handles.arm_joints)
@@ -909,16 +818,11 @@ def main() -> None:
                 _tilt = euler_deg_to_quat_wxyz(*args.grasp_tilt_rpy)
                 _G_home = quat_mul_wxyz(list(_G_home), list(_tilt))
                 print(f"[scene] GRASP TILT {args.grasp_tilt_rpy} deg applied to the held orientation")
-            _grip_R_offset = (None if args.eef_traj else
-                              quat_mul_wxyz(quat_conj_wxyz(conn_world[0][1]), _G_home))  # fixed cable->gripper
+            _grip_R_offset = quat_mul_wxyz(quat_conj_wxyz(conn_world[0][1]), _G_home)  # fixed cable->gripper
 
-        def grip_rot_xyzw(cq, i=None):                        # desired gripper orientation at a frame -> XYZW
-            if args.eef_traj:
-                # CABLE mode: the gripper orientation is RECORDED, not inferred from the plug.
-                g = _eef_grip_q[0 if i is None else min(i, len(_eef_grip_q) - 1)]
-            else:
-                g = (_G_home if args.insert_hold_home_rot      # hold home orientation (cord flexes), OR
-                     else quat_mul_wxyz(list(cq), _grip_R_offset))  # ride the cable's relative rotation
+        def grip_rot_xyzw(cq):                                # desired gripper orientation at a frame -> XYZW
+            g = (_G_home if args.insert_hold_home_rot          # hold home orientation (cord flexes), OR
+                 else quat_mul_wxyz(list(cq), _grip_R_offset)) # ride the cable's relative rotation
             return wp.vec4(g[1], g[2], g[3], g[0])            # IKObjectiveRotation wants XYZW
 
         frames = []
@@ -1053,8 +957,6 @@ def main() -> None:
                     cp_p, cq_p = cp0, cq0
                 poses = scene_poses(bqe)
                 poses[2] = static_pose(cp_p, cq_p, conn_anchor)
-                if _tail:
-                    poses[3] = poses[2]                        # boot TAIL rides the head pose
                 rgb_out = render_gs(poses, dyn_cameras=wrist_cams(bqe))
                 if not args.no_preview:
                     frames.append(_white_bg(compose_multicam(rgb_out, cam_labels)))
@@ -1159,8 +1061,6 @@ def main() -> None:
                 poses = scene_poses(bqa)
                 if not args.gripper_only:
                     poses[2] = static_pose(cp0, cq0, conn_anchor)     # connector waits at the start pose
-                    if _tail:
-                        poses[3] = poses[2]                           # boot TAIL rides the head pose
                 wc = wrist_cams(bqa)
                 if args.dump:                                         # full-episode data: EEF = grasp point
                     hp, hqw = newton_pose(bqa, wrist3)
@@ -1193,7 +1093,7 @@ def main() -> None:
             if ik_solver is not None:                          # solve arm so the grasp point reaches the plug
                 pos_obj.set_target_positions(wp.array([wp.vec3(*ik_tgt[i])], dtype=wp.vec3))
                 rot_obj.set_target_rotations(                       # home-relative grasp: ride cable's
-                    wp.array([grip_rot_xyzw(cq, i)], dtype=wp.vec4))   # cable mode: recorded, not inferred
+                    wp.array([grip_rot_xyzw(cq)], dtype=wp.vec4))   # relative rotation, not plug's absolute
                 ik_solver.step(joint_q_ik, joint_q_ik, iterations=24)
                 ikq = joint_q_ik.numpy()[0]
                 for j in arm_coords:
@@ -1233,9 +1133,7 @@ def main() -> None:
                         pen[n][1] = max(pen[n][1], dmax)
             poses = scene_poses(state_0.body_q.numpy())
             if not args.gripper_only:
-                poses[2] = static_pose(cp, cq, conn_anchor)    # index 2 = connector HEAD -> follow the trajectory
-                if _tail:
-                    poses[3] = poses[2]                        # index 3 = boot TAIL rides the same pose
+                poses[2] = static_pose(cp, cq, conn_anchor)    # index 2 = connector -> follow the trajectory
             wc = wrist_cams(state_0.body_q.numpy())
             if args.dump:                                      # EEF = grasp point (continuous across phases)
                 bqr = state_0.body_q.numpy()

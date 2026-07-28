@@ -42,7 +42,7 @@ def rot6d_to_quat_xyzw(r6):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--npz", required=True)
-    ap.add_argument("--out", default="cable_traj_npz", help="root dir for the ep_XXXX folder")
+    ap.add_argument("--out", default="../data/vla_train/cable_traj_npz", help="root dir for the ep_XXXX folder")
     ap.add_argument("--ep", type=int, default=0, help="episode index -> ep_XXXX")
     ap.add_argument("--env", type=int, default=0, help="which env column of the npz")
     ap.add_argument("--cut-at-hold", action="store_true",

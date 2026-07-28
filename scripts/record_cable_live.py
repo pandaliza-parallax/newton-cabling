@@ -4,7 +4,7 @@ This is the third mode, alongside the two offline ones:
 
   rl/record_cable_env.py        policy -> rerun .rrd            (geometry only, no images)
   gen_cable_traj + batch_v4     policy -> .npy -> GS replay      (datagen; two passes)
-  record_cable_live.py  (this)  policy -> Newton -> GS, live     (debug/demo; one pass)
+  scripts/record_cable_live.py  (this)  policy -> Newton -> GS, live     (debug/demo; one pass)
 
 Why it exists: the replay path has to re-derive every pose through a seat-frame transform
 (--eef-rpy) and pick which recorded channel drives which splat -- a whole class of calibration
@@ -12,8 +12,8 @@ bugs. Here every splat rides its ACTUAL Newton body, so no world transform is ne
 The only calibrations left are splat->body-frame (--conn-rpy / --jack-rpy), which are the same
 values the replay path uses because they describe the splat asset, not the scene.
 
-    .venv/bin/python record_cable_live.py --checkpoint rl/runs/cable_v3/best_model.pt \
-        --stage 4 --cable-tilt 5 --steps 130 --out live_out
+    .venv/bin/python scripts/record_cable_live.py --checkpoint rl/runs/cable_v3/best_model.pt \
+        --stage 4 --cable-tilt 5 --steps 130 --out ../data/ppo_rollouts/live_out
 
 Needs the DalusSimCore renderer UP (see tools/render_batch_v4.sh header) and sudo (SHM).
 Splat count differs from the batch path -> RESTART the renderer when switching between them.
@@ -29,8 +29,9 @@ import torch
 from scipy.spatial.transform import Rotation as Rot
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
-sys.path.insert(0, os.path.join(_HERE, "rl"))
-sys.path.insert(0, _HERE)
+_ROOT = os.path.dirname(_HERE)          # repo root (this file lives in scripts/)
+sys.path.insert(0, os.path.join(_ROOT, "rl"))
+sys.path.insert(0, _ROOT)
 # DalusPySim (the parallax_sim renderer client). render_batch_v4.sh exports this as PYTHONPATH,
 # but `sudo` strips the environment on a direct invocation -- and this script is ALWAYS run under
 # sudo (SHM is root-owned). So add it here rather than relying on the caller's env.
@@ -54,7 +55,7 @@ HOST_GRIPPER_CUT = f"{HOST_PARALLAX}/parallax-demo-isaac-lab/assets/sbot_gs/grip
 HOST_WRIST3 = f"{HOST_PARALLAX}/parallax-demo-isaac-lab/assets/sbot_gs/arm_nogrip/wrist_3_link_realpalm.ply"
 HOST_GSVLA = f"{HOST_PARALLAX}/gs-sim-vla/scene/assets"
 
-# same order/---names as record_sbot_scene_gs_cable.py; base_link is the fixed root (static).
+# same order/---names as scripts/record_sbot_scene_gs_cable.py; base_link is the fixed root (static).
 LINK_SPLATS = (
     "base_link", "shoulder_link", "upper_arm_link", "forearm_link",
     "wrist_1_link", "wrist_2_link", "wrist_3_link",
@@ -184,7 +185,7 @@ def main():
     # --bg-ply the JACK would land at index 0 and freeze at its registration pose (this is
     # exactly why the jack was invisible in the first live run). Synthesize an invisible
     # 1-gaussian background when none is given, so every real splat gets a live transform --
-    # the same trick record_sbot_scene_gs_cable.py uses for --gripper-only.
+    # the same trick scripts/record_sbot_scene_gs_cable.py uses for --gripper-only.
     bg_host = args.bg_ply
     if not bg_host:
         bg_host = os.path.join(HOST_GSVLA, "objects", "_live_dummy_bg.ply")
@@ -244,7 +245,7 @@ def main():
         rrd_path = args.rrd or (os.path.join(args.out, "rollout.rrd") if args.out else None)
         if rrd_path:
             os.makedirs(os.path.dirname(os.path.abspath(rrd_path)), exist_ok=True)
-            sys.path.insert(0, _HERE)
+            sys.path.insert(0, _ROOT)
             from newton_cabling.sim.recording import auto_blueprint, open_rrd_recorder  # noqa: PLC0415
             viewer = open_rrd_recorder(rrd_path)
             viewer.set_model(env.model)

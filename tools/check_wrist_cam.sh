@@ -28,7 +28,7 @@ TILT_FLAG=""
 [ -n "${TILT:-}" ] && TILT_FLAG="--grasp-tilt-rpy $TILT"
 
 rm -rf "$OUT"
-.venv/bin/python record_sbot_scene_gs.py \
+.venv/bin/python scripts/record_sbot_scene_gs.py \
     --plug-traj eval_traj_v2/ep_0009/plug_traj.npy \
     --jack-pos $JACK_POS \
     --base-pos $BASE_POS --base-yaw-deg $BASE_YAW_DEG \

@@ -49,7 +49,7 @@ for i in $(seq "$START" $((END - 1))); do
     [ -f "$traj" ] || { echo "[eval] $ep: no trajectory, skipping"; continue; }
     rm -rf "$out"
     echo "[eval] $ep ..."
-    .venv/bin/python record_sbot_scene_gs.py \
+    .venv/bin/python scripts/record_sbot_scene_gs.py \
         --plug-traj "$traj" \
         --jack-pos $JACK_POS \
         --base-pos $BASE_POS --base-yaw-deg $BASE_YAW_DEG \

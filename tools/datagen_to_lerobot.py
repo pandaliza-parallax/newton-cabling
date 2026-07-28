@@ -1,6 +1,6 @@
 """Convert the sbot GS datagen dump (tools/render_batch.sh) into a LeRobot v2.1 dataset.
 
-Input layout (per episode, from record_sbot_scene_gs.py --dump):
+Input layout (per episode, from scripts/record_sbot_scene_gs.py --dump):
   <raw>/ep_XXXX/{image/frame_*.png, wrist_image/frame_*.png,
                  state.npy (T,10), action.npy (T,7), phase.npy (T,), meta.json}
 

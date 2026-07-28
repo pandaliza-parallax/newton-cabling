@@ -109,7 +109,7 @@ def main():
     ap.add_argument("--cable-tilt", type=float, default=5.0)
     ap.add_argument("--steps", type=int, default=130)
     ap.add_argument("--seed", type=int, default=0)
-    ap.add_argument("--out", default="newton_ref")
+    ap.add_argument("--out", default="../data/ppo_rollouts/newton_ref")
     ap.add_argument("--frames", type=int, nargs="*", default=None,
                     help="explicit frame indices to render (default: start, mid, seated)")
     args = ap.parse_args()
