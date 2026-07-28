@@ -26,3 +26,10 @@ runs/
 *.pt
 *.pth
 *.ckpt
+
+# ---- Editor / agent workspace ----
+.claude/
+
+# ---- Rollout recordings (regenerable; .rrd/.rbl already ignored above) ----
+*.npz
+*.npy
