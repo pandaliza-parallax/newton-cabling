@@ -39,7 +39,7 @@ from newton.solvers import SolverVBD  # noqa: E402
 # Local reusable package: connector spec + scene builder, the hard-won VBD setup,
 # grasp spring, recording helpers, the declarative cycle timeline, and the
 # structured cycle report.
-sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))  # repo root
 from newton_cabling.cable import route_cable_from_boot  # noqa: E402
 from newton_cabling.connector import rj45_connector  # noqa: E402
 from newton_cabling.report import CycleMeasurements, evaluate_cycle, outcome_to_dict  # noqa: E402

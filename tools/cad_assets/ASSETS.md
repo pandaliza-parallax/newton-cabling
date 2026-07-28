@@ -100,7 +100,7 @@ The cable is **procedural**, not a file asset:
 | File | What |
 |---|---|
 | `newton_cabling/cable.py` → `route_cable_from_boot()` | generates a draped cable centerline; `builder.add_rod(...)` makes it a Cosserat rod (bend/twist springs). |
-| `record_patch_panel.py`, `record_panda_cycle.py` | demos that attach the cable to the plug boot. |
+| `examples/record_patch_panel.py`, `examples/record_panda_cycle.py` | demos that attach the cable to the plug boot. |
 
 Note: the **RL insertion env (`rl/connector_env.py`) has no cable** — it's socket + plug +
 latch only. The cable appears only in the recording/demo scripts (and the bundled

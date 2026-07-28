@@ -1,6 +1,6 @@
 """Milestone A of the sbot friction grasp: can the AG-145's kinematic fingers grip the plug?
 
-Port of record_grasp_test.py (Panda) to the RO1 + AG-145, same cloth_franka pattern:
+Port of examples/record_grasp_test.py (Panda) to the RO1 + AG-145, same cloth_franka pattern:
 every robot body is KINEMATIC (posed by eval_fk from commanded joint_q each substep, so
 contact cannot shake it), only the finger link meshes collide (SDF + friction), and the
 plug is a free VBD rigid body held purely by finger contact + friction.

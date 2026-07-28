@@ -2,7 +2,7 @@
 
 See :mod:`newton_cabling.render.gs_bridge`. Pure-Python/numpy; importing this package
 does NOT import newton or warp, so it lints/tests off-GPU. The runnable demo is the
-top-level ``record_rj45_insert_gs.py``.
+top-level ``examples/record_rj45_insert_gs.py``.
 """
 
 from .gs_bridge import (

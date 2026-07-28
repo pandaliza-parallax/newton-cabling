@@ -13,7 +13,7 @@ The focus splats are NOT origin-centred (mount centroid ~[0.066,-0.027,-0.008],
 cord ~[0.162,-0.100,0.067], metres). --recenter drops each focus splat's centroid to
 origin so --parts-offset becomes "where on the table to place the connector centre".
 
-Needs the single parallax_sim renderer running (see record_rj45_insert_gs.py header)
+Needs the single parallax_sim renderer running (see examples/record_rj45_insert_gs.py header)
 and the same sudo + PYTHONPATH. Example (connector on the table, in the room):
 
   sudo PYTHONPATH=/home/pandaliza/parallax/data-generator/sim_engine/DalusPySim \

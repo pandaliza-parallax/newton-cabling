@@ -229,7 +229,7 @@ def proven_cycle_timeline(
     is an upper bound, not the final depth).
 
     Note: the durations and states mirror the verified 19s run, but re-wiring
-    ``record_panda_cycle.py`` to consume this timeline and re-confirming the
+    ``examples/record_panda_cycle.py`` to consume this timeline and re-confirming the
     dynamics on a GPU box is still pending. The schedule's *structure* (valid
     seamless loop, continuous trajectory) is covered by the unit tests.
     """

@@ -2,7 +2,7 @@
 
 Newton drives the 6-DOF arm; each frame we read the seven arm-link world poses out of
 ``state.body_q`` and ship them + a camera to the parallax_sim renderer over POSIX SHM,
-saving the returned RGB. This is the RJ45 GS pipeline (record_rj45_insert_gs.py) with
+saving the returned RGB. This is the RJ45 GS pipeline (examples/record_rj45_insert_gs.py) with
 seven moving objects instead of one.
 
 Registration is trivial -- and already proven on the Isaac side. Each ``sbot_gs/*.ply``

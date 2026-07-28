@@ -25,7 +25,7 @@ newton.use_coord_layout_targets = True
 
 from newton.solvers import SolverVBD  # noqa: E402
 
-sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))  # repo root
 from newton_cabling.connector import rj45_connector  # noqa: E402
 from newton_cabling.report import CycleMeasurements, evaluate_cycle, outcome_to_dict  # noqa: E402
 from newton_cabling.sim.safe_vbd import finalize_for_vbd, new_vbd_builder  # noqa: E402

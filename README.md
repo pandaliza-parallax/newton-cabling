@@ -72,24 +72,24 @@ Each `record_*.py` builds a scene, runs headless, and writes a rerun `.rrd` (plu
 To produce and view one (needs a CUDA GPU and the `sim` extra — see [Running it](#running-it)):
 
 ```bash
-uv run --extra sim python record_patch_panel.py     # writes patch_panel.rrd + patch_panel.rbl
+uv run --extra sim python examples/record_patch_panel.py     # writes patch_panel.rrd + patch_panel.rbl
 uvx --from rerun-sdk rerun patch_panel.rrd patch_panel.rbl
 ```
 
 (Substitute any `record_*.py`; each writes a matching `.rrd`/`.rbl` pair.)
 
-- **`record_rj45_insert.py` / `record_rj45_unplug.py`** — the connector physics, driven by the
+- **`examples/record_rj45_insert.py` / `examples/record_rj45_unplug.py`** — the connector physics, driven by the
   proven spring rig: insertion with a latch that deflects over the socket lip and clicks; a
   pull-without-press control (latch holds), then press-and-extract.
-- **`record_cable_twist.py`** — three cables of increasing bend stiffness with a spinning driven
+- **`examples/record_cable_twist.py`** — three cables of increasing bend stiffness with a spinning driven
   end; twist propagation through 90° bends.
-- **`record_panda_cycle.py`** — a Franka FR3 running the full insert → release → retreat → return
+- **`examples/record_panda_cycle.py`** — a Franka FR3 running the full insert → release → retreat → return
   → press → extract loop (force-spring grasp), as a seamless 19s loop.
-- **`record_patch_panel.py`** — a row of RJ45 ports at **real keystone pitch (18mm)**; cables
+- **`examples/record_patch_panel.py`** — a row of RJ45 ports at **real keystone pitch (18mm)**; cables
   start retracted and plug in side by side.
-- **`record_param_sweep.py`** — N connector worlds in one model, one GPU pass, scored per-world by
+- **`examples/record_param_sweep.py`** — N connector worlds in one model, one GPU pass, scored per-world by
   `evaluate_cycle`; sweeping press depth discovers the extraction threshold.
-- **`record_grasp_test.py`** — milestone toward the real friction grasp (see below).
+- **`examples/record_grasp_test.py`** — milestone toward the real friction grasp (see below).
 
 ## Key learnings
 
@@ -128,7 +128,7 @@ the arm from (`example_robot_panda_hydro`) grasps with **real finger friction**;
 `example_cloth_franka` shows the workable pattern — a **kinematically driven arm** (so contact
 can't shake it) co-simulated with a VBD deformable, gripping via finger contact.
 
-`record_grasp_test.py` validates the first milestone: kinematic fingers holding a free VBD rigid
+`examples/record_grasp_test.py` validates the first milestone: kinematic fingers holding a free VBD rigid
 body by contact friction (no spring). Remaining milestones: conclusive grip + lift, insertion
 while gripping (the grip must resist the insertion force — the genuinely hard part of robotic
 connector insertion), a fingertip-driven latch press, and the cable draping on the now-stable arm.
@@ -148,7 +148,7 @@ The `record_*.py` demos need a **CUDA GPU** and the `sim` extra, which installs 
 (the demos use main-branch APIs the released PyPI build lags on):
 
 ```bash
-uv run --extra sim python record_panda_cycle.py
+uv run --extra sim python examples/record_panda_cycle.py
 ```
 
 The demos import Newton/Warp and are excluded from the static gate above.

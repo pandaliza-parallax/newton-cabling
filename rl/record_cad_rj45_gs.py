@@ -1,7 +1,7 @@
 """Render the REAL McMaster-CAD RJ45 insertion (`cad_rj45`) through the Gaussian-Splat
 renderer — so the physics body and the rendered splat are the same part.
 
-Unlike the top-level ``record_rj45_insert_gs.py`` (which drives Newton's bundled *toy*
+Unlike the top-level ``examples/record_rj45_insert_gs.py`` (which drives Newton's bundled *toy*
 ``rj45_plug.usd``), this drives the McMaster ``cad_rj45`` rig via ``ConnectorVecEnv`` with
 the scripted base controller (zero residual — the path ``rl/smoke_asset.py`` shows seats
 cad_rj45), and feeds the plug + socket poses to the splat renderer.
@@ -10,7 +10,7 @@ Splats (the real scanned part) are placed on the physics bodies by subtracting e
 splat's native centroid (rough body-frame alignment — the exact splat↔body ICP is still
 TODO; treat placement as approximate). Cable is not rendered (cad_rj45 has no cable).
 
-Run (single clean parallax_sim renderer must be up — see record_rj45_insert_gs.py header):
+Run (single clean parallax_sim renderer must be up — see examples/record_rj45_insert_gs.py header):
     cd newton-cabling
     sudo PYTHONPATH=/home/pandaliza/parallax/data-generator/sim_engine/DalusPySim \
       .venv/bin/python rl/record_cad_rj45_gs.py --smoke --out /tmp/gs_cad

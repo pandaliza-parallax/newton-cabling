@@ -26,7 +26,7 @@ newton.use_coord_layout_targets = True
 import newton.utils  # noqa: E402
 from newton.solvers import SolverVBD  # noqa: E402
 
-sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))  # repo root
 from newton_cabling.sim.recording import auto_blueprint, open_rrd_recorder  # noqa: E402
 from newton_cabling.sim.safe_vbd import add_actuated_urdf, find_body_index, finalize_for_vbd  # noqa: E402
 
