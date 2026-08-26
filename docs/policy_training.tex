@@ -1,0 +1,99 @@
+% policy_training.tex -- IEEEtran-ready fragment (no preamble).
+% \input{policy_training} or paste before \end{document}.
+% Companion to newton_cabling_setup.tex and data_generation.tex.
+
+\providecolor{cmured}{RGB}{196, 18, 48}
+
+%=====================================================================
+\section{Policy Training and Closed-Loop Evaluation}
+%=====================================================================
+
+\subsection{Policies}
+
+We train two policy families on the 1000-episode set (and its
+arc-length-resampled variant). The first is a pretrained
+vision-language-action model ($\pi_{0.5}$) fine-tuned with LoRA
+adapters on both the 2B vision-language backbone and the 300M action
+expert, conditioned on the front and wrist views ($512^2$), the 10-D
+proprioceptive state, and a language prompt; action horizon 10
+(later 16), batch size 32, cosine learning rate peaking at
+$5\times10^{-5}$, 15--30k steps. The second is an ACT transformer
+($\sim$51M parameters) trained from scratch on the same data at
+chunk sizes 10 and 100, executing each predicted chunk in full
+before re-observing; it is not language-conditioned. Both consume
+identical observations through the same evaluation harness, so
+differences in closed-loop behaviour are attributable to
+architecture and data variant rather than the interface.
+
+\subsection{Open-Loop Probe: Learning Is Not the Problem}
+
+Before closed-loop evaluation we probe checkpoints on
+training-distribution frames, comparing the first predicted action
+against the expert's recorded action. Learning proceeds steadily:
+translation error falls from 0.274 to 0.088\,mm and the action
+direction cosine rises from 0.59 to 0.85 between 5k and 20k steps
+(plateauing near 12.5k), and one-step predictions sit on the expert
+path. Whatever fails downstream, it is not single-step imitation.
+
+\subsection{Closed-Loop Results}
+
+Evaluation runs the full live pipeline --- the servo-plant physics
+environment with the fixture, campaign visuals including shadows
+(required for observation parity), and the same artifact-cleanup
+model in the loop. Across held-out start seeds \emph{no policy seats
+the connector} ($0/24$ for $\pi_{0.5}$ at step 10k). Under the most
+favourable conditions --- replaying the exact conditions of a
+training episode --- Table~\ref{tab:nc-closedloop} records each
+model's closest approach.
+
+\begin{table}[!htp]
+\centering
+\caption{Closed-loop behaviour under training-episode conditions.
+``Original'' is the 1000-episode set; ``resampled'' its arc-length
+resampled variant. Depth is distance short of the seat at closest
+approach; the bore tolerance is $\sim$3\,mm lateral.}
+\label{tab:nc-closedloop}
+\resizebox{\columnwidth}{!}{%
+\begin{tabular}{@{}llll@{}}
+\toprule
+\textbf{Policy} & \textbf{Data} & \textbf{Closest approach} & \textbf{Failure mode} \\
+\midrule
+$\pi_{0.5}$ (h=10) & original & 19\,mm short & stalls at the standoff \\
+$\pi_{0.5}$ (h=16) & resampled & 4.7\,mm @ 10\,mm lat & no stall; drifts past the jack \\
+ACT (c=10) & original & 9.7\,mm @ 5.8\,mm lat & slow creep; best alignment \\
+ACT (c=10) & resampled & pre-dock @ 3.0\,mm lat & then loses lateral lock (25--30\,mm) \\
+ACT (c=100) & original & 7.8\,mm @ 10\,mm lat & early 25\,mm lateral excursion \\
+\bottomrule
+\end{tabular}%
+}
+\end{table}
+
+Three observations. First, the standoff stall is partly
+architecture-specific: ACT trained on the \emph{same} original data
+does not stall, while $\pi_{0.5}$ does, so the pause pathology in
+the data is amplified by, not solely responsible for, the behaviour.
+Second, arc-length resampling removes the stall but trades it for
+boldness without precision: the resampled ACT reaches a nearly
+perfect pre-dock pose ($3.0$\,mm lateral) and then charges forward,
+losing lateral lock --- the resampling floor evidently removed the
+slow fine-alignment regime along with the pauses. Third,
+\textcolor{cmured}{every model misses laterally} (at best
+$5.8$\,mm against the $\sim$3\,mm bore).
+
+\subsection{Diagnosis: Compounding, Not Perception}
+
+The probe and the closed-loop table together isolate the failure:
+one-step predictions are accurate, but integrating the policy's own
+deltas drifts 4--6\,mm within 40 frames \emph{even when
+teacher-forced on ground-truth observations} --- already beyond the
+bore tolerance. This is classic behavioural-cloning compounding: the
+expert data contains no return-to-path behaviour, so once off-axis
+every model stays off. This is precisely the supervision an RL
+teacher would have provided (see the remark in the data-generation
+section), and it motivates the next campaign: recovery
+demonstrations. A validated pilot generates them two ways ---
+off-nominal starts placed directly in the pre-dock failure zone
+(4--16\,mm lateral, where every recorded frame is corrective), and
+injected lateral perturbations during alignment, with episodes split
+at the perturbation so that labels remain consistent pose deltas ---
+alongside denser coverage of the terminal phase.

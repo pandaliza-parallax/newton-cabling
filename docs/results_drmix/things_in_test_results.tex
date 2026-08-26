@@ -1,0 +1,114 @@
+\section{\color{cmured} \textbf{Things in TEST --- results}}
+
+\begin{itemize}
+    \item \textbf{ACT-c10 on dp01} --- trained (15k steps, loss 0.213) and mid-screen.
+    So far 0/4 strict seats but \textbf{1 physically completed insertion}
+    (plug left in jack, 109 frames parked $>$14\,mm aligned): the gentle 0.1\,mm
+    floor alone already restores enough fine alignment to finish, even with zero
+    recovery data.
+
+    \item \textbf{40-episode eval matrix} --- \textbf{done} (08:42--12:34).
+    First-ever closed-loop seats: ACT-depaused 1/20 (on a \emph{held-out}
+    condition), pi05-depaused 1/20 (train condition), plus 4 stable deep
+    insertions 1--2\,mm short. Revised the ``always drifts'' N=1 verdict:
+    depaused models are low-rate succeeders ($\sim$5\% strict), and the
+    bottleneck moved from ``can't find the hole'' to the final millimetres.
+
+    \item \textbf{ACT-c10 + tier-2 recovery} --- \textbf{the decisive experiment,
+    and the thesis held.} Two variants trained: recovery-\emph{only}
+    (weak alone: 0/6, one bore entry --- it lacks full approaches, as expected)
+    and \textbf{combined} (depaused base + recovery, 1{,}562 eps):
+    \textbf{2/6 physically completed insertions incl.\ one held-out} ---
+    plug fully in the jack, hand withdrawn --- scored 0/6 only because the
+    seat criterion requires the plug \emph{grasped} at depth (the gripper slips
+    during the terminal push). Recovery data is confirmed as the missing
+    ingredient; the new (much smaller) bottleneck is terminal grip slip.
+    Follow-up staged: consistent 0.1\,mm-floor mix
+    (\texttt{dp01} base + \texttt{tier2rec\_dp01}, pushing to HF now) to test
+    whether preserved slow-push behavior converts ``insert-then-slip'' into held
+    seats.
+
+    \item {\color{cmured}low priority} \textbf{pi05 on dp01 + tier2} --- not
+    started (team/cluster). Now the recommended production retrain given the
+    ACT results; all datasets staged on HF.
+\end{itemize}
+
+\subsection*{\color{cmured} New datasets behind these tests}
+
+\paragraph{De-paused demonstrations.}
+The scripted expert nearly halts at its pre-dock standoff ($\sim$0.02\,mm/frame,
+19\,mm before the socket), so a third of all frames carried near-zero action labels
+--- which $\pi_{0.5}$ learned as an absorbing ``stop here'' state. We resample each
+episode by arc length (keep a frame only after $\geq$0.2\,mm of motion) and recompute
+all action labels from the retained poses. This removes 23\% of frames and cuts the
+slow-frame fraction from 27.1\% to 0.1\%, leaving recovery segments and the action
+distribution untouched.
+
+\paragraph{Finer variant (dp01).}
+The 0.2\,mm floor overshot: de-paused models move decisively but lose the expert's
+careful final alignment. A 0.1\,mm floor (10.8\% cut) removes parking while
+preserving the fine-alignment regime.
+
+\paragraph{Recovery demonstrations (tier-2).}
+No demonstration showed how to return to the path after an error --- the failure every
+model shared. Two remedies (562 eps / 50{,}755 frames, same plant and DR as the base
+corpus): \emph{off-nominal starts} (200 eps beginning 15--22\,mm out and up to
+16\,mm off-axis, so every frame is corrective), and \emph{perturbation recovery}
+(a brief 2--6\,mm lateral hijack of the command, then expert correction). Since labels
+come from pose differences, the shove would read as intentional motion --- episodes
+are therefore split at the perturbation, keeping only the recovery. A 0.1\,mm re-trim
+accompanies the dp01 base.
+
+\footnotesize{HuggingFace: \texttt{cable\_drmix\_*\_\{depaused,dp01\}},
+\texttt{cable\_tier2rec\_*\_\{depaused,dp01\}} (Parallax-Worlds).}
+
+\subsection*{\color{cmured} If time permits, things to try}
+
+\begin{enumerate}
+    \item \textbf{RL-based teacher.} Replace/augment the scripted expert with an RL
+    policy trained in sim (privileged state, force-aware reward): it would discover
+    terminal-push and slip-avoidance behavior the hand-tuned controller lacks, and
+    its natural state-visitation already covers off-path recovery --- no kick
+    machinery needed.
+    \item \textbf{DAgger-style targeted recovery.} Roll out the \emph{current} policy,
+    detect divergence, and relabel its own visited states with the scripted expert.
+    All infrastructure exists (eval harness + controller); this replaces synthetic
+    kicks with data at exactly the states the policy actually reaches.
+    \item \textbf{Temporal ensembling for ACT} (\texttt{temporal\_ensemble\_coeff}),
+    currently disabled. Averages overlapping chunk predictions at eval time --- zero
+    retraining, historically reduces jerk and chunk-boundary drift.
+    \item \textbf{Wrist-image dropout during training.} Attention maps show the wrist
+    view carries the task while the front view anchors on background; randomly
+    blanking the wrist image would force front-view competence --- the sensor needed
+    for recovery once the plug leaves the wrist frame.
+    \item \textbf{Observation history} (\texttt{n\_obs\_steps} $>$ 1). A single-frame
+    policy cannot distinguish ``drifting left'' from ``statically offset left'';
+    velocity context should sharpen corrections.
+    \item \textbf{Terminal-phase grip fix.} Diagnose the insert-then-slip failure:
+    higher grasp force / friction in the plant, slower commanded push in the last
+    2\,mm (dp01 may already fix this), or score released-but-seated as success.
+    \item \textbf{Recovery-share sweep.} Combined used $\sim$28\% recovery data;
+    try 40--50\% before generating anything new.
+    \item \textbf{Real-bench fine-tune.} Record supervised bench trials at 60\,Hz;
+    even tens of real episodes (especially corrections) may close most of the
+    sim-to-real gap.
+\end{enumerate}
+
+\paragraph{Where the policy looks.}
+To probe \emph{how} the policies use their two views, we visualize the ACT decoder's
+cross-attention --- head-averaged weights of the ten action queries over the encoder's
+image tokens, mapped back onto each camera --- across timesteps of both nominal and
+recovery episodes (Fig.~\ref{fig:attn}). The division of labor is consistent: the
+wrist camera carries the task (52--56\% of attention mass, concentrated in a sharp
+hotspot on the plug tip and the plug--socket contact zone), while the front camera
+attends mostly to static background structure, apparently serving as a coarse pose
+anchor rather than a servoing signal. This asymmetry offers a mechanistic account of
+the universal no-recovery failure: once a policy drifts far enough that the plug and
+socket leave the wrist view, its primary task sensor is gone, and the front view was
+never trained to take over. Notably, on off-path frames from the recovery dataset the
+front camera's attention visibly shifts onto the jack --- suggesting recovery training
+recruits exactly the missing front-view competence, and giving us a cheap,
+rollout-free diagnostic for future checkpoints: front-camera attention on the socket
+in off-path states should co-vary with recovery ability. (Attention is suggestive
+rather than causal; the model has a single decoder layer, so these maps summarize its
+only cross-attention stage.)

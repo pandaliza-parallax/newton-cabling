@@ -1,0 +1,244 @@
+% data_generation.tex -- IEEEtran-ready fragment (no preamble).
+% \input{data_generation} or paste before \end{document}.
+% Companion to newton_cabling_setup.tex (simulation + rendering).
+% Uses amssymb (\mathbb) and dsfont (\mathds), both in the preamble.
+
+\providecolor{cmured}{RGB}{196, 18, 48}
+
+%=====================================================================
+\section{Data Generation}
+%=====================================================================
+
+Demonstrations are produced in two decoupled stages: batched physics
+rollouts that record trajectories, followed by a separate rendering
+pass that replays them through the splat scene. The physics stage
+runs 32--64 parallel environments on one GPU with no renderer in the
+loop; rendering is serial and expensive. Decoupling lets us re-render
+the same trajectories under new visual randomization without
+re-simulating, and apply randomization independently at each stage.
+
+%---------------------------------------------------------------------
+\subsection{Learning the Expert with RL}
+%---------------------------------------------------------------------
+
+Our first expert was a PPO policy commanding gripper motion
+directly. The policy maps a privileged simulator state to an
+end-effector delta, executed verbatim at 60\,Hz:
+\begin{equation}
+    a_t \sim \pi_\theta(s_t), \qquad
+    a_t \in [-1,1]^7 = [\Delta p\,(3),\ \Delta r\,(3),\ g\,(1)]
+\end{equation}
+with $\Delta p$ scaled to $\pm$2\,mm of translation and $\Delta r$
+(a rotation vector) to $\pm 0.75^{\circ}$ of rotation per step; the
+gripper dimension is kept for format compatibility with the
+downstream visuomotor policy but is inert (the grasp is fixed). The
+state $s_t \in \mathbb{R}^{22}$ concatenates the proprioception the
+visuomotor policy will also receive --- end-effector position, 6-D
+rotation, gripper --- with privileged terms that images must later
+replace: the scaled connector-to-seat error, the rotation error to
+the seat frame, and the connector's linear and angular velocities.
+The reward is dense progress plus a seated bonus and a contact
+penalty,
+\begin{equation}
+    r_t = w_p \left( d_{t-1} - d_t \right)
+        + R_s\, \mathds{1}[\text{seated}_t]
+        - w_v\, v_t ,
+\end{equation}
+where $d_t$ is a weighted distance to the seat pose ($w_p = 100$),
+the seated bonus ($R_s = 30$) is velocity-damped, and $v_t$ counts
+finger--jack contact frames ($w_v = 2$). Success is hold-based ---
+seated within 5\,mm depth, 3\,mm lateral and $8^{\circ}$ angular
+error for 20 consecutive steps --- because an instantaneous position
+criterion was gameable by a twisted plug. A five-stage curriculum
+grows the approach distance (10 to 30\,mm) and the jack's lateral
+offset (0 to 8\,mm), with cable droop scaling per stage; the only
+environment-side action modification is a standoff clamp capping
+forward motion 3\,mm before the jack mouth. The policy is a small
+actor--critic MLP ($2\times256$, state-independent log-std) trained
+on 64 parallel environments, warm-started by behavioural cloning
+from a simple servo routine.
+
+\subsubsection{What Failed}
+
+Getting this to train at all took three runs, each failure
+diagnosing a missing ingredient:
+
+\begin{itemize}
+  \item \textbf{Curriculum interacted with the lever arm.} With cable
+        droop randomized from the start, the nominally easiest stage
+        was already top-stage difficulty --- tilting the cable swings
+        the grip point $\sim$19\,mm through the wrist-to-grasp lever
+        --- and the first run finished at \textbf{0\,\% held success
+        for the entire run}, with the bootstrap actively degrading
+        (eval depth shrank from 23 to 10\,mm). Droop had to become a
+        curriculum axis.
+  \item \textbf{A fresh critic destroys the BC initialization.} The
+        first policy update after warm-starting measured a KL of
+        0.13 --- garbage advantages from an untrained value function
+        wiped out the cloned behaviour immediately. Training the
+        critic alone for the first iterations fixed this.
+  \item \textbf{Exploration noise is incompatible with a hold
+        criterion.} PPO never shrank its action noise on its own
+        (entropy stayed at its initial value for 100+ iterations),
+        and at $\sigma = 0.29$ the action noise random-walks the plug
+        $\sim$2.6\,mm over the 20-step hold window against a 3\,mm
+        tolerance --- holds break stochastically no matter how good
+        the mean action is. The second run plateaued at $\sim$30\,\%;
+        an explicit log-std anneal was the missing piece, after which
+        the policy promoted through all five curriculum stages to
+        90--94\,\% held success (violation frames falling from
+        30\,\% to 1--2\,\%).
+\end{itemize}
+
+Even converged, three properties disqualified the policy as a
+demonstrator. It parks $\sim$8\,mm past the design seat depth, so
+every demonstration ends in a subtly wrong state. It retains
+1--2\,\% finger--jack violation frames, forcing rejection filters on
+the generated data. And beyond its 96-step training horizon it can
+eject violently (78--125$^{\circ}$ of connector twist measured at
+$t = 160$--$200$), so episodes must be cut shortly after success. We
+also found that evaluation itself required care: a fixed-window
+success metric understated performance by $\sim$40 points
+(54.5\,\% measured vs.\ 94.8\,\% true steady-state at $\mu = 0.5$)
+because it measured insertions still in progress --- success must be
+read from a settled tail or a hold counter --- and single-seed
+results are unreliable
+under the simulator's contact nondeterminism, so every claim is
+evaluated over batched rollouts. The policy's one clear advantage is
+speed (it seats a 49\,mm-out, $7^{\circ}$-drooping start in
+$\sim$40 steps, twice as fast as the scripted controller below), but
+speed is not what behavioural cloning needs from a demonstrator.
+
+\medskip
+\noindent\fbox{\parbox{\dimexpr\columnwidth-2\fboxsep-2\fboxrule}{%
+\textcolor{cmured}{\textbf{Remark.}} Due to time constraints we
+shifted to the scripted teacher, which is the better
+\emph{demonstration writer}: correct terminal state, zero
+violations, smooth deterministic actions. Ideally, however, a
+working RL expert is the better \emph{teacher}: training visits
+off-nominal states and learns to return from them, so its rollouts
+--- and DAgger-style relabeling of the student's own drifted states
+--- contain exactly the return-to-path supervision a scripted
+controller never demonstrates. The recovery-demonstration machinery
+we add later reconstructs by hand what an RL expert would have
+provided naturally.}}
+
+%---------------------------------------------------------------------
+\subsection{The Scripted Expert}
+%---------------------------------------------------------------------
+
+Production data instead comes from a scripted align-then-insert
+controller: it aligns outside the contact band, rate-limits rotation
+to the $0.3^{\circ}$/step the shallow friction grasp can actually
+follow, pushes along the insertion axis, and detects jams from
+stalled progress. It seats 100\,\% of episodes across all curriculum
+stages with zero finger--jack violations and parks at the design
+depth ($-0.04$\,mm), so the success gate and violation filters the
+PPO data required all become no-ops. Its episodes are
+$\sim$2.3$\times$ longer ($\sim$110 vs.\ $\sim$46 frames), which we
+treat as a feature: episode length scales with the initial error, so
+the dataset covers the whole approach rather than only the final
+centimetres. Because the controller is deterministic and its actions
+peak near 40\,\% of the per-step caps, we optionally inject
+exploration noise into the \emph{executed} action and record what
+was executed --- recording the clean command would teach the policy
+actions whose consequences it never observed. For hardware-faithful
+kinematics the controller is driven through the calibrated servo
+chain described in the simulation section.
+
+%---------------------------------------------------------------------
+\subsection{Recording What the Policy Commands}
+%---------------------------------------------------------------------
+
+An earlier pipeline replayed the \emph{connector} trajectory and
+inferred the gripper from it by per-frame IK. Two independent IK
+solves of nominally the same pose disagree, so the recorded
+end-effector state jumped at the grasp handoff (rotation steps of
+$12$--$24^{\circ}$ against a $7.5^{\circ}$ background), and since
+the jump appeared at the same task moment in every episode,
+behavioural cloning learned it as intended behaviour: \emph{after
+closing the gripper, whip the wrist}. We now record the wrist
+trajectory itself --- the quantity the policy commands --- and let
+the connector follow its own simulated pose; nothing is inferred.
+Trajectories are stored seat-relative in both position and
+orientation, which is what makes render-time jack placement jitter
+sound: the splat, the replayed trajectory, the IK and the shadows
+all move together.
+
+%---------------------------------------------------------------------
+\subsection{Curation and Label Surgery}
+%---------------------------------------------------------------------
+
+Success is read from a hold counter (consecutive seated frames)
+rather than a fixed time window, per the evaluation artifact above.
+Only successful episodes are kept, cut shortly after the hold is
+established so datasets are not dominated by a seated plug sitting
+still.
+
+A known failure mode comes from the expert's pre-insertion
+standoff: it decelerates smoothly through the pose where the policy
+must eventually push, behavioural cloning reproduces the near-zero
+actions there, and the deployed policy stalls or bounces at the
+standoff. To counter this we resample episodes by arc length: a
+frame is kept only once the accumulated motion since the last kept
+frame exceeds a floor (in mm of translation or degrees of
+rotation), and action labels are recomputed across the cuts under
+the same delta convention, so every label magnitude lands within
+one original step of the floor. The first frame, retreat and
+recovery segments, gripper transitions, and the terminal frames
+(the ``stop at seat'' signal) are always preserved. Whether this
+removes the closed-loop stall is still under evaluation.
+
+%---------------------------------------------------------------------
+\subsection{Campaign Structure}
+%---------------------------------------------------------------------
+
+Data is generated in seeded chunks: each chunk draws its own grip
+point, controller jitter, background yaw and shadow strength, on top
+of per-episode randomization of jack yaw, cable droop, grasp roll,
+lateral offset and approach distance. Every fifth chunk is a
+hard-recovery chunk with jam-and-retreat behaviour enabled, so the
+dataset contains recoveries rather than only clean insertions.
+Rendered episodes are packaged at 30\,fps with front and wrist
+views, a 10-D state (end-effector position, 6-D rotation, gripper)
+and 7-D delta actions (translation, rotation vector, gripper),
+paired with varied natural-language prompts.
+Table~\ref{tab:nc-datamix} summarizes the composition and
+randomization of the 1000-episode set (the grasp roll is centred on
+$150^{\circ}$ rather than the nominal $180^{\circ}$ because the
+latter sits on a joint-branch boundary of the servo arm).
+
+\begin{table}[!htp]
+\centering
+\caption{Distribution of the 1000-episode dataset. Levels: a value
+is drawn once per environment (env), per episode (ep), or per
+50-episode chunk.}
+\label{tab:nc-datamix}
+\resizebox{\columnwidth}{!}{%
+\begin{tabular}{@{}lll@{}}
+\toprule
+\multicolumn{3}{@{}l}{\textbf{Composition}} \\
+\midrule
+Episodes & \multicolumn{2}{l}{1000 (20 chunks $\times$ 50), all successful insertions} \\
+Hard-recovery chunks & \multicolumn{2}{l}{4 of 20 (200 ep; executed-action noise $\sigma{=}0.08$)} \\
+Recovery (retreat) episodes & \multicolumn{2}{l}{53 (26\,\% of hard-chunk episodes)} \\
+Grip point 45 / 50 / 55\,mm & \multicolumn{2}{l}{200 / 300 / 500 ep} \\
+Frames & \multicolumn{2}{l}{165{,}834 (median 156/ep, p10--p90 128--205)} \\
+After arc-length resampling & \multicolumn{2}{l}{127{,}500 ($-23$\,\%)} \\
+\midrule
+\textbf{Randomization axis} & \textbf{Range} & \textbf{Level} \\
+\midrule
+Grasp roll & $150 \pm 3^{\circ}$ & env \\
+Cable droop & $-5$ to $8^{\circ}$ & env \\
+Jack yaw & $\pm 5^{\circ}$ & ep \\
+Lateral offset & uniform disk, $\leq$8\,mm & ep \\
+Approach distance & 25--35\,mm & ep \\
+Controller jitter & standoff 3--6.7\,mm, push gain 0.15--0.38 & chunk \\
+Jack placement (render) & $\pm$7\,cm on the table plane & ep \\
+Background yaw & $U(0^{\circ}, 360^{\circ})$ & chunk \\
+Shadow strength & $U(0.5, 0.8)$ & chunk \\
+Rendering gamma & $\{1.0, 1.2, 1.4, 1.8\}$ & ep \\
+\bottomrule
+\end{tabular}%
+}
+\end{table}

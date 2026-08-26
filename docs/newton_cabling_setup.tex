@@ -1,0 +1,196 @@
+% newton_cabling_setup.tex -- IEEEtran-ready fragment (no preamble).
+% \input{newton_cabling_setup} or paste before \end{document}.
+% Needs only packages already in the preamble.
+
+\providecolor{cmured}{RGB}{196, 18, 48}
+
+%=====================================================================
+\section{Simulation: Deformable Cable Insertion}
+%=====================================================================
+
+To study insertion with a deformable object, we simulate ethernet
+cabling: the robot grips a flexible cable $\sim$5\,cm behind the
+connector, so the RJ45 plug dangles from its strain-relief boot and
+must be levelled and seated into a panel-mount jack with
+sub-millimetre clearance. This section summarizes the design of the
+simulation and the empirical lessons that shaped it.
+
+\subsection{Choice of Physics Engine}
+
+We evaluated MuJoCo, Genesis, Isaac Sim, and Newton. MuJoCo and
+Genesis could not resolve the fine cable/connector interaction, which
+left the two NVIDIA-stack options. We chose Newton over Isaac Sim
+because its VBD solver treats one-dimensional deformables ---
+self-collision, bend/twist transport, two-way coupling to rigid
+bodies --- as a first-class, GPU-batched capability, and because it
+is a headless Python library rather than a GUI-centric Omniverse
+application, which kept iteration on contact behaviour fast. The cost
+is maturity: PhysX articulations are far more battle-tested, and we
+spent roughly fifteen debugging iterations discovering undocumented
+VBD constraints (fixed joints freeze deformable chains unless
+merged away; actuated joints must be softened; the rest pose must be
+updated via forward kinematics before the solver is constructed;
+stable joint-limit damping is $\sim 10^{-4}$, four orders of
+magnitude below the conventional default).
+Since Newton is also being integrated into Isaac Lab as a swappable
+backend, we do not view the choice as locking us out of that
+ecosystem.
+
+\subsection{Cable and Contact Modelling}
+
+We model the cable at two fidelities. For teacher training, the cable
+is a Cosserat rod of 10\,mm capsule segments (radius 3.25\,mm,
+spanning 6\,cm behind to 5\,cm ahead of the grasp), with the
+connector attached as a mesh shape on the front segment ---
+attaching it as a welded rigid body destabilizes VBD. A PPO teacher
+trained in this environment reaches 94.4\,\% held-success at the
+hardest curriculum stage. For large-scale data generation we
+substitute a rigid approximation: a single free body carrying the
+cord capsule, the plug mesh, and a small box at the grasp point that
+gives the flat fingerpads a roll-lock a smooth capsule lacks.
+
+Contact uses narrow-band signed-distance fields built directly on
+the CAD meshes ($k_e = 10^{6}$, contact gap 0.1\,mm, socket
+$\mu = 0.5$, cable $\mu = 2.0$), avoiding convex decomposition
+entirely. Two findings dominated the design.
+\textcolor{cmured}{First}, contact damping must be zero: the default
+($k_d = 100$) acts through SDF shell contacts that fire at several
+millimetres of actual separation, injecting up to
+$\sim$400\,rad/s of spurious angular velocity into the light
+(6.9\,g) connector. \textcolor{cmured}{Second}, contacts must never
+act on articulation bodies: every grasp variant that allowed this
+diverged. We therefore disable finger-mesh collision and realize the
+grasp with two kinematic pad proxies placed at the measured pad
+faces, closed to a $\sim$1.5\,mm effective squeeze on the 6.5\,mm
+cable.
+
+\subsection{Robot Model}
+
+The arm (StandardBots RO1 with an AG-145 gripper) is driven
+kinematically: end-effector deltas ($\pm$2\,mm, $\pm 0.75^{\circ}$
+per 60\,Hz step) are converted to joint targets by
+damped-least-squares IK and interpolated across the eight physics
+substeps, so the shallow grasp is never violated within a step. For
+hardware-faithful data we replace direct IK with the real controller
+chain --- jerk-limited trajectory retiming, 500\,Hz streaming,
+10\,ms transport delay, a 2\,ms plant --- which reaches 100\,\% held
+success once
+replanning is seeded with velocity and acceleration state (the naive
+rest-to-rest replan advanced only 0.12\,\% of commanded motion).
+
+\subsection{Digital-Twin Geometry}
+
+Geometry comes from the manufacturer CAD models of the plug and jack
+(McMaster-Carr 9953K216 and 1422N17). Our first conversion, a 0.10\,mm
+voxel remesh, silently destroyed the task --- the real plug--cavity
+clearance is $\sim$0.11\,mm, comparable to the voxel pitch, so the
+gap quantized to zero. We instead tessellate the STEPs directly; the
+narrow-band SDF tolerates the resulting non-watertight meshes and
+preserves the true clearance. We also removed the latch catch ledge
+from the physics model after finding that a rigid connector jams on
+it (the real part inserts only because the plastic flexes). To keep
+physics and rendered appearance consistent, a scan-matched variant
+registers a photogrammetry scan of the real cable+plug into the CAD
+frame (Kabsch alignment, sub-micron residual), so the collision mesh
+matches the splat the cameras see. For real-world collection we
+print a single-body fixture that holds the jack rigidly, with a
+simulated twin registered to the socket to within 0.5\,mm.
+
+\subsection{Determinism}
+
+Kinematic quantities (joint streams, wrist poses) reproduce
+bit-exactly across runs; contact dynamics do not, because VBD's
+contact reduction uses GPU atomics and the resulting contact
+ordering perturbs the friction impulse on the light connector ---
+same-seed episodes near the success boundary can flip. We therefore
+validate calibration transfer on kinematic channels (exact to
+$2.5\times10^{-14}$ degrees) and evaluate dynamic outcomes
+statistically.
+
+%=====================================================================
+\section{Photoreal Observations via Gaussian Splatting}
+%=====================================================================
+
+\subsection{Rendering Architecture and Scene}
+
+Observations are produced by compositing the Newton state into a
+Gaussian-splat reconstruction of the real scene. An external
+renderer receives per-object world transforms and camera parameters
+each frame and returns RGB; the interface is physics-agnostic, so
+the same renderer serves our Isaac/PhysX pipeline. The scene comprises 19 splats: table, jack,
+connector head and tail, and the 15 robot links.
+
+Because a deformable cannot be represented by a rigid splat, the
+cable itself is not rendered: the connector head and boot splats
+ride the simulated plug-face pose, the cord behind them is simulated
+but unrendered, and the plug splat is cropped to the rigid extent
+the physics actually tracks. The plug splat is baked by
+\emph{reusing the physics registration}, guaranteeing that pixels
+and collision geometry cannot drift apart; the jack splat is
+registered by point-pair correspondence, which also resolves the
+arbitrary SfM scale of the reconstruction (0.8193; 0.91\,mm surface
+residual). Robot splats keep only degree-0 spherical harmonics, as
+the renderer misinterprets higher orders.
+
+\subsection{Cameras}
+
+All views use the intrinsics of the real Intel RealSense D415 at
+$640\times480$ ($f_x{=}605.78$, $f_y{=}605.29$, $c_x{=}326.14$,
+$c_y{=}229.88$), so simulated and real observations share a
+projection model; both are square-resized to $512^2$ identically. Up
+to four views are rendered --- front, side, mirror, and a dynamic
+wrist camera whose pose and FOV are taken from the calibrated camera
+mount in the robot model, so the eye-in-hand view is rigid by
+construction. We
+verify simulator--renderer alignment by rendering the Newton scene
+from identical cameras and diffing against the GS frames; this
+requires reproducing the wrist camera's $\sim$8$^{\circ}$ roll,
+which the stock debug camera cannot represent.
+
+\subsection{Shadows, Compositing, and Randomization}
+
+Gaussians emit baked radiance, so dynamic objects cast no shadows
+and appear pasted onto the scene. We recover shadows with a two-pass
+path-traced ratio mask over the Newton geometry: a pass with and a
+pass without dynamic occluders, whose luminance ratio (clamped at 1)
+multiplies the GS frame. All terms except occlusion cancel between
+the passes, so no segmentation is needed and the reconstruction's
+own baked shadows are not double-darkened. Frames are then
+gamma-corrected (1.8) and cleaned by Difix3D before dataset
+conversion; at evaluation, live camera frames pass through the same
+Difix so the policy sees its training distribution.
+
+Domain randomization spans both halves of the pipeline: background
+yaw over $U(0,360^{\circ})$ and shadow strength over $U(0.5, 0.8)$;
+jack placement jitter of $\pm$7\,cm on the table plane; jack splat
+scale from $1.0$ to $1.3$; rendering gamma; grip point (45--55\,mm
+behind the plug); and, at trajectory generation, grasp roll, jack
+yaw, cable droop, lateral offsets, and approach distance. Key
+calibration values are collected in Table~\ref{tab:nc-constants}.
+
+\begin{table}[!htp]
+\centering
+\caption{Key simulation and rendering parameters. The connector
+alignment and jack anchor encode corrected registration bugs (the
+plug splat's insertion axis is local $+z$; the trajectory origin
+sits 12\,mm past the jack mouth).}
+\label{tab:nc-constants}
+\resizebox{\columnwidth}{!}{%
+\begin{tabular}{@{}lll@{}}
+\toprule
+\textbf{Quantity} & \textbf{Value} & \textbf{Note} \\
+\midrule
+Solver & VBD, 24 iterations, 8 substeps & 60\,Hz control \\
+Contact & $k_e{=}10^{6}$, $k_d{=}0$, gap 0.1\,mm & SDF resolution 512 \\
+Jack position & $(0.295, -0.876, 0.835)$\,m & world frame \\
+Robot base & $(0.426, -0.106, 0.87)$\,m & \\
+Jack anchor & $(0, 0, 0.018)$\,m & $0.030$ mouth $-$ $0.012$ seat-aim \\
+Connector alignment & $(-90, 0, 0)^{\circ}$ RPY & insertion axis local $+z$ \\
+Connector anchor & $(-1.5, -1.5, 17.2)$\,mm & mating face in plug splat \\
+Grip angle & $-0.0152$\,rad & 6.35\,mm gap, 6.5\,mm cable \\
+Camera & D415 $640\times480 \rightarrow 512^2$ & 30\,fps \\
+\bottomrule
+\end{tabular}%
+}
+\end{table}
+
