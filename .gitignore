@@ -45,3 +45,8 @@ out_*/
 # ---- mesh2splat intermediates: 200MB+ of bake, re-derivable from the scan with
 #      tools/bake_jack_v2.py; nothing in the repo loads them ----
 newton_cabling/assets/ethernet/*_m2s_*.ply
+
+# Registration data, not recordings: the blanket *.npy / *.json rules above would
+# drop the transforms the scanned-asset bakes are BUILT from.
+!newton_cabling/assets/ethernet/headA_scan_frame_R.npy
+!newton_cabling/assets/ethernet/assets/objects/Ethernet_cable_headA/headA_frame.json

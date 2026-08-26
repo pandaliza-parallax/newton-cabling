@@ -1,0 +1,21 @@
+{
+  "description": "Head-A plug frame measured from the parent scan (Ethernet_cable_corrected/mesh.usd)",
+  "tip_m": [
+    -0.155466,
+    0.107199,
+    -0.054662
+  ],
+  "axis_out": [
+    -0.772779,
+    -0.157435,
+    -0.614839
+  ],
+  "axis_note": "unit vector pointing OUT of the plug tip, away from the cable",
+  "crop": {
+    "type": "cylinder",
+    "length_m": 0.06,
+    "radius_m": 0.016,
+    "frame": "axis-aligned from tip, symmetric about axis_out"
+  },
+  "source_frame": "parent mesh.usd coordinates (Z-up, meters)"
+}
