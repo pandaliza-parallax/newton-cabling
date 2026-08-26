@@ -105,6 +105,166 @@ from newton_cabling.render.scene_gs_common import (  # noqa: E402
     xform_pose,
 )
 
+
+class LiveEnv:
+    """Drive the render from a LIVE Newton physics env instead of a recorded trajectory.
+
+    This is what makes ``--policy-server`` a PHYSICS rollout rather than a kinematic replay: the
+    plug is a free VBD body held by finger friction against a real socket, so it can jam, tilt or
+    slip instead of riding a rigid latch to the hand.
+
+    Obs parity is by construction, not by re-calibration: the env's bodies are mapped into the
+    scene by the SAME seat-frame transform the datagen replay uses (gen_trajectories.to_seat_frame
+    -> --eef-rpy -> _to_world). That round trip is exactly how every training image was rendered,
+    so the policy sees the view it trained on even though the env's own world frame differs from
+    the scene's (the env parks its jack ~24cm from where the calibrated scene puts it).
+    """
+
+    def __init__(self, *, stage: int, tilt, seed: int, grip_from_head: float | None = None,
+                 connector_usd: str = "cad_rj45.usd", grasp_roll_180: bool = True,
+                 jack_fixture: bool = False, servo_plant: bool = False,
+                 jack_yaw_deg: float = 0.0, grasp_roll_deg: float | None = None):
+        sys.path.insert(0, os.path.join(str(pathlib.Path(__file__).resolve().parents[1]), "rl"))
+        import rigid_cable_env as em  # noqa: PLC0415
+
+        from newton_cabling.scripted_controller.gen_trajectories import to_seat_frame  # noqa: PLC0415
+
+        self._em = em
+        self._to_seat = to_seat_frame
+        t = tuple(tilt) if len(tilt) > 1 else tilt[0]
+        if grasp_roll_deg is not None:
+            em.GRASP_ROLL_DEG = grasp_roll_deg   # drmix training data uses 150
+        if grip_from_head is not None:
+            # GRIP_BACK is read as a module global inside __init__ (same hook rl/record_cable_env.py
+            # uses). head55 training data was generated at 55mm, so the default here matches it.
+            gb = grip_from_head / 1000.0 - em.BOOT
+            if gb <= 0.0:
+                raise SystemExit(f"--live-grip-from-head must exceed BOOT ({em.BOOT * 1000:.1f}mm)")
+            em.GRIP_BACK = gb
+        if servo_plant:
+            # calibrated servo plant (Wave-4 commanded regime): same step API, arm lags
+            # the command like the real RO1 — the plant the drmix data was generated on.
+            import servo_cable_env  # noqa: PLC0415
+            env_cls = servo_cable_env.ServoCableVecEnv
+        else:
+            env_cls = em.RigidCableVecEnv
+        self.env = env_cls(1, seed=seed, cable_tilt_deg=t,
+                           connector_usd=connector_usd, grasp_roll_180=grasp_roll_180,
+                           jack_fixture=jack_fixture, jack_yaw_deg=jack_yaw_deg)
+        self.env.set_stage(stage)
+        self.env.reset()
+        labels = list(self.env.model.body_label)
+        self.wrist = [i for i, l in enumerate(labels) if l.endswith("wrist_3_link")][0]
+        self._viewer = None
+        self._rrd_path = None
+        print(f"[live] RigidCableVecEnv stage {stage} tilt {t} seed {seed}: "
+              f"plug is a free VBD body (friction grasp + real socket contact)")
+
+    # ── rerun recording of the REAL physics model ────────────────────────────────
+    # Note this logs the ENV's model/state, not the renderer's kinematic arm: the .rrd is the
+    # actual contact simulation (plug, socket, cable, fingers), which is the whole point of
+    # --live-env. The render model would only show the commanded arm pose.
+    def start_recording(self, path: str) -> None:
+        os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
+        self._rrd_path = path
+        self._viewer = open_rrd_recorder(path)
+        self._viewer.set_model(self.env.model)
+        print(f"[live] recording Newton physics -> {path}")
+
+    def log(self, t: float) -> None:
+        if self._viewer is None:
+            return
+        self._viewer.begin_frame(t)
+        self._viewer.log_state(self.env.state_0)
+        self._viewer.end_frame()
+
+    def finish(self) -> str | None:
+        if self._viewer is None:
+            return None
+        rbl = os.path.splitext(self._rrd_path)[0] + ".rbl"
+        auto_blueprint(rbl, self.env.model)
+        print(f"[live] Newton physics -> {self._rrd_path}\n"
+              f"[live]   view:  uvx --from rerun-sdk rerun {self._rrd_path} {rbl}")
+        return rbl
+
+    def seat_poses(self):
+        """(wrist, plug-face) poses in the env's SEAT frame -- the frame eef_traj.npy stores."""
+        bq = self.env.state_0.body_q.numpy()
+        fp, fq = self.env._face_pose(bq)
+        sp, sq = self.env.seat_pos[0], self.env.seat_q[0]          # seat_q is XYZW
+
+        def rel(p, q_xyzw):
+            arr = np.concatenate([np.asarray(p, float),
+                                  [q_xyzw[3], q_xyzw[0], q_xyzw[1], q_xyzw[2]]])[None]
+            return np.asarray(self._to_seat(arr, sp, sq)[0], float)
+
+        return rel(bq[self.wrist, :3], bq[self.wrist, 3:7]), rel(fp[0], fq[0])
+
+    def step(self, a_metric, grasp_offset=None, wrist_quat_wxyz=None):
+        """Apply a VLA action, converting BOTH units and reference point.
+
+        Two conversions, and skipping either is silent:
+
+        1. UNITS -- the VLA emits metric deltas (m / rad); the env wants [-1,1] normalised by its
+           own per-step authority (MAX_DPOS / MAX_DROT).
+        2. REFERENCE POINT -- the VLA's deltas are of the GRASP POINT (that is what `state10`
+           records and therefore what the action head learned), but the env applies dpos/drot to
+           the WRIST BODY ORIGIN. grasp_offset is ~207mm down the tool axis, so feeding a
+           grasp-point rotation straight through swings the plug about that lever instead of
+           turning it in place: ~10deg of accumulated rotation drags the plug ~36mm sideways,
+           systematically, and the policy misses the jack while appearing to servo perfectly.
+           Rotating about the grasp point means the wrist must translate to compensate:
+               w' = (g + dpos) - R'.o        with g = w + R.o
+           => dpos_wrist = dpos + R.o - R'.o
+        """
+        a = np.zeros((1, 7))
+        dpos = np.asarray(a_metric[:3], float)
+        drot = np.asarray(a_metric[3:6], float)
+        if grasp_offset is not None and wrist_quat_wxyz is not None:
+            from scipy.spatial.transform import Rotation as _R  # noqa: PLC0415
+            q = np.asarray(wrist_quat_wxyz, float)
+            R = _R.from_quat([q[1], q[2], q[3], q[0]])          # wxyz -> xyzw
+            R_new = _R.from_rotvec(drot) * R
+            o = np.asarray(grasp_offset, float)
+            dpos = dpos + R.apply(o) - R_new.apply(o)
+        a[0, 0:3] = np.clip(dpos / self._em.MAX_DPOS, -1.0, 1.0)
+        a[0, 3:6] = np.clip(drot / self._em.MAX_DROT, -1.0, 1.0)
+        a[0, 6] = float(a_metric[6])
+        self.env.step(a)
+
+    def make_teacher(self, *, standoff_mm: float = 5.0, push_correction: float = 0.3):
+        """Scripted align-then-insert controller (privileged state, no images).
+
+        The CONTROL for --live-env: it drives the identical physics + seat-frame mapping + action
+        conversion as the policy, but never looks at a rendered image. If the teacher seats and
+        the policy does not, the harness is sound and the gap is in what the policy SEES; if the
+        teacher misses too, the bug is in this bridge (mapping, IK or action scaling)."""
+        from newton_cabling.scripted_controller import (  # noqa: PLC0415
+            AlignInsertController, config_for_rigid_cable_env, observe_rigid_cable_env)
+        cfg = config_for_rigid_cable_env(self._em, align_standoff_m=standoff_mm / 1000.0,
+                                         push_correction=push_correction)
+        ctrl = AlignInsertController(1, cfg)
+        self._observe = observe_rigid_cable_env
+        print(f"[live] TEACHER control: scripted align-then-insert | "
+              f"mouth {cfg.mouth_along_m * 1000:+.1f}mm | pre-dock {cfg.align_along_m * 1000:+.1f}mm")
+        return ctrl
+
+    def teacher_action(self, ctrl) -> np.ndarray:
+        """Already in the env's normalised [-1,1] units -- do NOT push through step()'s converter."""
+        return np.asarray(ctrl.act(self._observe(self.env)), dtype=np.float64)
+
+    def step_normalised(self, a_norm) -> None:
+        self.env.step(np.asarray(a_norm, dtype=np.float64).reshape(1, 7))
+
+    @property
+    def hold(self) -> int:
+        return int(self.env.hold[0])
+
+    @property
+    def seated(self) -> bool:
+        return self.hold >= self._em.HOLD_STEPS
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--out", default="out_sbot_scene")
@@ -115,6 +275,15 @@ def main() -> None:
     ap.add_argument("--connector-ply", default=f"{HOST_GSVLA}/objects/ethernet/cropped_plug_head.ply",
                     help="connector HEAD splat (RJ45 plug). Default = cropped_plug_head.ply (front "
                          "half of cad_plug_registered). Placed at the plug FACE pose.")
+    ap.add_argument("--grip-theta", type=float, default=None,
+                    help="AG-145 driver angle used when the jaws are CLOSED on the payload. "
+                         "Default = GRIPPER_THETA_CLOSED (0.0), which pinches the jaws shut -- "
+                         "correct for v3, where the gripper holds the plug BODY. The rigid "
+                         "cable env instead grips a 6.5mm CABLE at THETA_CABLE=-0.0152 (measured "
+                         "6.42mm pad gap). Rendering that grasp at 0.0 drives each pad 2.06mm "
+                         "INSIDE the cable and occludes ~10mm of the gripped stretch, so the "
+                         "wrist view shows shut jaws with the cable seeming to float past them. "
+                         "Pass -0.0152 for the cable track.")
     ap.add_argument("--connector-tail-ply",
                     default=f"{HOST_GSVLA}/objects/ethernet/cropped_plug_tail_longer.ply",
                     help="connector TAIL splat (boot / cable-exit). Shares the plug frame, so it rides "
@@ -156,6 +325,29 @@ def main() -> None:
                     help=f"background room splat (host path), e.g. {HOST_GSVLA}/background/splat.ply")
     ap.add_argument("--bg-pos", type=float, nargs=3, default=[0.0, 0.0, 0.0],
                     help="background placement (render_config uses origin)")
+    ap.add_argument("--bg-yaw-deg", type=float, default=0.0,
+                    help="yaw the background splat about world-z at --bg-pos (background-only "
+                         "DR: table/jack/robot/cameras unmoved). The room's baked lighting "
+                         "rotates with it; keep modest unless --bg-pos is re-tuned.")
+    ap.add_argument("--fixture-ply", default=None,
+                    help="optional fixture splat rendered STATIC at the jack's pose. Must be "
+                         "authored in the SAME local frame as the jack splat (mouth at +z 0.030); "
+                         "e.g. jack_fixture_black.ply baked from the bench-fixture STL, so the "
+                         "physical --jack-fixture geometry is visible in the GS scene.")
+    # ray-traced contact shadows (docs/relight_shadows.md): OVRTX cast/nocast masks from the
+    # NEWTON scene (arm, cable, jack vs the static table box) multiplied onto each GS frame.
+    ap.add_argument("--shadows", action="store_true",
+                    help="add ray-traced contact shadows via parallax-demo-newton's relight pass "
+                         "(needs ovrtx; two path-trace passes per lens per frame)")
+    ap.add_argument("--shadow-strength", type=float, default=1.0,
+                    help="0..1 blends the shadow mask toward no-op")
+    ap.add_argument("--shadow-accum", type=int, default=12,
+                    help="path-tracer accumulation frames per pose per pass")
+    ap.add_argument("--shadow-mask-scale", type=float, default=0.5,
+                    help="trace masks at this fraction of GS res and upsample (shadows are "
+                         "low-frequency; 0.5 is nearly free)")
+    ap.add_argument("--shadow-light-angle", type=float, default=12.0,
+                    help="key-light angular diameter (deg) — penumbra width")
     # placement (tune by eyeballing frames)
     # Table moved forward (+y) so the floor-mounted arm doesn't pass through it (its
     # home pose threads through the table top otherwise); the arm works in front of /
@@ -205,6 +397,38 @@ def main() -> None:
                     help="gripper jaws: held closed (default), held open, or cycled open/closed")
     # CABLE replay (rl/gen_cable_traj.py): the EEF is RECORDED and the connector follows its own
     # simulated pose -- the cable PPO direction. Mutually exclusive with --plug-traj.
+    # ── LIVE physics mode: --policy-server drives a real Newton env instead of a replayed traj ──
+    ap.add_argument("--live-env", action="store_true",
+                    help="with --policy-server: roll the policy out in LIVE Newton physics "
+                         "(RigidCableVecEnv) instead of replaying --eef-traj with a rigidly "
+                         "latched plug. The plug becomes a free VBD body held by finger friction "
+                         "against a real socket, so it can jam/tilt/slip. The env is mapped into "
+                         "this scene by the same seat-frame transform the datagen replay uses, so "
+                         "the policy's observation is unchanged. Needs no --eef-traj.")
+    ap.add_argument("--live-stage", type=int, default=4, help="--live-env curriculum stage (4 = full)")
+    ap.add_argument("--live-fixture", action="store_true",
+                    help="--live-env: mount the jack in the bench fixture (collision parity "
+                         "with the drmix training data)")
+    ap.add_argument("--live-servo", action="store_true",
+                    help="--live-env: drive the arm through the calibrated servo plant "
+                         "(ServoCableVecEnv) instead of the kinematic arm")
+    ap.add_argument("--live-jack-yaw", type=float, default=0.0,
+                    help="--live-env: per-episode jack yaw DR, |yaw| <= deg (drmix used 5)")
+    ap.add_argument("--live-grasp-roll-deg", type=float, default=None,
+                    help="--live-env: GRASP_ROLL_DEG base override (drmix used 150)")
+    ap.add_argument("--live-tilt", type=float, nargs="+", default=[5.0],
+                    help="--live-env connector droop (deg). ONE value = fixed, TWO = per-env range.")
+    ap.add_argument("--live-seed", type=int, default=0)
+    ap.add_argument("--no-rrd", action="store_true",
+                    help="--live-env: skip the .rrd/.rbl rerun recording of the physics")
+    ap.add_argument("--live-teacher", action="store_true",
+                    help="--live-env CONTROL: drive with the scripted align-then-insert controller "
+                         "(privileged state, no images) instead of the policy server. Same physics, "
+                         "same seat-frame mapping, same IK -- so if the teacher seats and the policy "
+                         "does not, the harness is validated and the gap is in the observation.")
+    ap.add_argument("--live-grip-from-head", type=float, default=55.0,
+                    help="--live-env mm from the plug FACE back to the grip point (55 = the "
+                         "head55 training geometry)")
     ap.add_argument("--eef-traj", default=None,
                     help="ep_XXXX/eef_traj.npy from rl/gen_cable_traj.py: (T,7) [pos3, quat4 wxyz] "
                          "wrist_3_link pose, positions SEAT-relative (same anchoring as --plug-traj). "
@@ -514,6 +738,7 @@ def main() -> None:
 
     # connector TAIL (boot) splat: shares the plug frame with the head -> rides the same pose+anchor.
     _tail = args.connector_tail_ply if str(args.connector_tail_ply).lower() not in ("none", "") else None
+    grip_theta = GRIPPER_THETA_CLOSED if args.grip_theta is None else args.grip_theta
 
     gonly = [n for n in LINK_SPLATS if "finger" in n]          # the 8 gripper finger links
     dummy_bg = None
@@ -549,6 +774,13 @@ def main() -> None:
         print(f"[scene] pedestal: {args.mount_size * 100:.0f}x{args.mount_size * 100:.0f}cm column floor->"
               f"z={base_z:.3f} ({ng} gaussians) under base {np.round(args.base_pos, 3)}")
 
+    fixture_pose = None
+    if args.fixture_ply and not args.gripper_only:               # fixture LAST -> indices stable
+        obj_plys.append(host_to_container(args.fixture_ply))
+        # identical transform to the jack splat: the fixture ply shares its local frame
+        fixture_pose = static_pose(jack_pos, jack_splat_q, jack_anchor)
+        print(f"[scene] jack fixture splat: {args.fixture_ply} (static, rides the jack pose)")
+
     def scene_poses(bq):
         if args.gripper_only:                                                  # DEBUG: just the fingers
             poses = [newton_pose(bq, dyn_bodies[n]) for n in gonly]
@@ -571,6 +803,8 @@ def main() -> None:
         ]
         if ped_pose is not None:
             poses.append(ped_pose)                                              # pedestal (static, last)
+        if fixture_pose is not None:
+            poses.append(fixture_pose)                                          # jack fixture (static, last)
         return poses
 
     # ── camera: frame arm + jack + table-top (bq0 already from eval_fk above) ─────────
@@ -717,15 +951,47 @@ def main() -> None:
         ply_paths=obj_plys, cam_K=cam_K, cam_pos=eye.tolist(), cam_quat=cam_quat,
         bg_ply=(host_to_container(dummy_bg) if args.gripper_only
                 else (host_to_container(args.bg_ply) if args.bg_ply else None)),
-        bg_pose=(list(args.bg_pos), [1.0, 0.0, 0.0, 0.0]),
+        bg_pose=(list(args.bg_pos),
+                 [math.cos(math.radians(args.bg_yaw_deg) / 2.0), 0.0, 0.0,
+                  math.sin(math.radians(args.bg_yaw_deg) / 2.0)]),
         show_viewer=args.show_viewer, dry_run=args.dry_run,
         extra_cameras=extra_cams,
     )
+
+    relight = None
+    if args.shadows and not args.gripper_only:
+        sys.path.insert(0, os.path.expanduser("~/parallax/parallax-demo-newton/src"))
+        from relight import RelightPass  # noqa: PLC0415
+        # one K per camera, in the renderer's order: primary + extra statics + wrist dyn
+        shadow_Ks = [cam_K]
+        for c in (extra_cams or []):
+            shadow_Ks.append(np.asarray(c[2]) if len(c) > 2 and c[2] is not None else cam_K)
+        if args.wrist_cam:
+            shadow_Ks.append(wrist_K)
+        relight = RelightPass(model, shadow_Ks, accum=args.shadow_accum,
+                              strength=args.shadow_strength,
+                              light_angle=args.shadow_light_angle,
+                              mask_scale=args.shadow_mask_scale)
+        print(f"[relight] shadow pass on: {len(shadow_Ks)} camera(s), accum {args.shadow_accum}, "
+              f"mask_scale {args.shadow_mask_scale}, strength {args.shadow_strength}")
 
     def render_gs(poses, dyn_cameras=None):
         # GS render + optional global brightness: gamma>1 lifts shadows (e.g. plug interior),
         # gain scales overall. Both default 1.0 = untouched. rgb is float in [0,1].
         rgb = client.render(poses, dyn_cameras=dyn_cameras)
+        if relight is not None:
+            # mask BEFORE the gamma lift: the shadow scales radiance, gamma is display-side.
+            # views mirror the renderer's camera order exactly (primary, extras, dyn wrist).
+            views = [(list(eye), list(cam_quat))]
+            views += [(list(c[0]), list(c[1])) for c in (extra_cams or [])]
+            views += [(list(c[0]), list(c[1])) for c in (dyn_cameras or [])]
+            a = np.clip(np.asarray(rgb, dtype=np.float32), 0.0, 1.0)
+            one = a.ndim == 3
+            if one:
+                a = a[None]
+            m = relight.masks(state_0, views, a.shape[1:3])
+            a = np.clip(a * m[..., None].astype(np.float32), 0.0, 1.0)
+            rgb = a[0] if one else a
         if args.gain == 1.0 and args.gamma == 1.0:
             return rgb
         a = np.clip(np.asarray(rgb, dtype=np.float32), 0.0, 1.0)
@@ -767,18 +1033,41 @@ def main() -> None:
     #     gripper pose (policy) -> cable physics -> plug pose
     # -- the inverse of --plug-traj, which infers the gripper from the plug via the cord-axis
     # heuristic below because the rigid track had no simulated cable. Nothing is inferred here.
-    if args.plug_traj or args.eef_traj:
-        if args.eef_traj:
-            eef_t = np.load(args.eef_traj)                           # (T,7) [pos3, quat4 wxyz], SEAT frame
+    live = None
+    if args.live_env:
+        if not args.policy_server:
+            raise SystemExit("--live-env only means anything with --policy-server")
+        live = LiveEnv(stage=args.live_stage, tilt=args.live_tilt, seed=args.live_seed,
+                       grip_from_head=args.live_grip_from_head,
+                       jack_fixture=args.live_fixture, servo_plant=args.live_servo,
+                       jack_yaw_deg=args.live_jack_yaw, grasp_roll_deg=args.live_grasp_roll_deg)
+        # The render arm must START at the env's reset grasp pose, not the fixed home pose --
+        # otherwise frame 0 is ~35mm out of distribution and the physics/render frames disagree.
+        args.eval_grasped_start = True
+        if not args.no_rrd:
+            live.start_recording(args.rrd or os.path.join(args.out, "rollout.rrd"))
+    _teacher = live.make_teacher() if (live is not None and args.live_teacher) else None
+
+    if args.plug_traj or args.eef_traj or live is not None:
+        if args.eef_traj or live is not None:
+            if live is not None:
+                # Synthesise a 1-frame "trajectory" from the env's reset state so the calibration
+                # below (seat_R, ik_tgt, conn_world) runs unchanged; the loop then overwrites these
+                # from the env every step instead of indexing further into a recorded array.
+                _e0, _c0 = live.seat_poses()
+                eef_t, conn_t = _e0[None], _c0[None]
+            else:
+                eef_t = np.load(args.eef_traj)                       # (T,7) [pos3, quat4 wxyz], SEAT frame
             # The connector splat tracks the plug FACE (face_traj), NOT the front-rod body (conn_traj):
             # the rod body sits -90deg-about-x from the plug frame, so feeding conn_traj fights the v3
             # plug-splat calibration (conn_align -90 0 0) and rotates the plug 90deg. face_traj has
             # seated quat ~ identity == v3's plug_traj convention, so v3's conn_align/anchor apply as-is.
-            _ct = args.conn_traj or os.path.join(os.path.dirname(args.eef_traj), "face_traj.npy")
-            conn_t = np.load(_ct)
-            if len(conn_t) != len(eef_t):
-                raise SystemExit(f"eef_traj ({len(eef_t)}) and {os.path.basename(_ct)} "
-                                 f"({len(conn_t)}) length mismatch")
+            if live is None:
+                _ct = args.conn_traj or os.path.join(os.path.dirname(args.eef_traj), "face_traj.npy")
+                conn_t = np.load(_ct)
+                if len(conn_t) != len(eef_t):
+                    raise SystemExit(f"eef_traj ({len(eef_t)}) and {os.path.basename(_ct)} "
+                                     f"({len(conn_t)}) length mismatch")
             jqw = list(jack_q)
             conn_align = euler_deg_to_quat_wxyz(*args.conn_rpy)      # plug-splat calibration (-90 0 0)
             conn_anchor = np.array(args.conn_anchor, float)
@@ -813,9 +1102,11 @@ def main() -> None:
                   f"(reach {np.linalg.norm(ik_tgt[0]-np.asarray(args.base_pos)):.3f}m)  "
                   f"min wrist z over traj={_wz:.3f} (table_top~0.785)  "
                   f"conn_start={np.round(conn_world[0][0],3)} seat={np.round(conn_world[-1][0],3)}")
-            print(f"[replay] CABLE mode: {len(conn_world)} frames from {args.eef_traj}; "
-                  f"connector at its OWN recorded pose (no cord-axis inference); "
-                  f"arm IK {'OFF' if args.no_arm_ik else 'ON'}")
+            print(f"[replay] CABLE mode: "
+                  + ("LIVE physics env (poses regenerated every step)" if live is not None
+                     else f"{len(conn_world)} frames from {args.eef_traj}")
+                  + "; connector at its OWN recorded pose (no cord-axis inference); "
+                  + f"arm IK {'OFF' if args.no_arm_ik else 'ON'}")
         # ── policy-rollout replay: connector (+ arm via IK) follows a recorded plug trajectory ──
         elif args.plug_traj:
             traj = np.load(args.plug_traj)                          # (T,7) [pos3, quat4 wxyz] in SOCKET frame
@@ -951,6 +1242,16 @@ def main() -> None:
             thb = math.radians(args.base_yaw_deg) / 2.0
             base_quat = [math.cos(thb), 0.0, 0.0, math.sin(thb)]
             jinv = quat_conj_wxyz(jqw)
+            # eef-traj mode: measure insertion in the SEAT frame (jack_pos anchor, seat_R
+            # orientation), NOT the raw jack frame. The rigid-env "0 0 180" eef_rpy flips
+            # the insertion axis, so the raw jack-frame y reads a start 51mm OUTSIDE the
+            # mouth as +51mm INSIDE -> instant false "seated" at step 0. Offsetting y by
+            # SEAT_AIM_DY (12mm) keeps the legacy mouth=0 convention: seat depth = +12mm,
+            # seated criterion y_sock >= 11mm unchanged.
+            _y_off = 0.0
+            if args.eef_traj or live is not None:      # --live-env uses the same seat frame
+                jinv = quat_conj_wxyz(seat_R)
+                _y_off = 0.012
 
             def cam224(rgb_out, label):
                 arr = np.asarray(rgb_out)
@@ -987,7 +1288,7 @@ def main() -> None:
                 for j in arm_coords:
                     jq[j] = ikq[j]
                 for idx, ratio in handles.gripper_coupling:
-                    jq[idx] = ratio * GRIPPER_THETA_CLOSED          # jaws closed on the plug
+                    jq[idx] = ratio * grip_theta                    # jaws closed on the plug
                 model.joint_q.assign(jq)
                 newton.eval_fk(model, model.joint_q, model.joint_qd, state_0)
                 bq_start = state_0.body_q.numpy()
@@ -999,7 +1300,11 @@ def main() -> None:
             grip, grasped, seated = 0.0, False, False
             grasp_step = seat_step = -1
             latch_p = latch_q = None
-            if args.eval_grasped_start:
+            _live_conn = (np.asarray(cp0, float), list(cq0))     # live mode: plug pose from physics
+            if live is not None:
+                # the env already has the plug in a settled friction grasp -- nothing to latch
+                grip, grasped, grasp_step = 1.0, True, 0
+            elif args.eval_grasped_start:
                 grip, grasped, grasp_step = 1.0, True, 0
                 qinv0 = quat_conj_wxyz(eef_qw)
                 latch_p = np.asarray(quat_rotate_wxyz(qinv0, np.asarray(cp0) - np.asarray(eef_pw)))
@@ -1024,13 +1329,18 @@ def main() -> None:
                 ikq = joint_q_ik.numpy()[0]
                 for j in arm_coords:
                     jq[j] = ikq[j]
-                theta = GRIPPER_THETA_OPEN + grip * (GRIPPER_THETA_CLOSED - GRIPPER_THETA_OPEN)
+                theta = GRIPPER_THETA_OPEN + grip * (grip_theta - GRIPPER_THETA_OPEN)
                 for idx, ratio in handles.gripper_coupling:
                     jq[idx] = ratio * theta
                 model.joint_q.assign(jq)
                 newton.eval_fk(model, model.joint_q, model.joint_qd, state_0)
                 bqe = state_0.body_q.numpy()
-                if not grasped and grip > 0.5:
+                if live is not None:
+                    # PHYSICS mode: the plug pose is whatever the friction grasp + socket contact
+                    # produced this step, not a rigid offset from the hand. No latch, no proximity
+                    # gate -- the env owns the plug and can drop or jam it.
+                    cp_p, cq_p = _live_conn
+                elif not grasped and grip > 0.5:
                     # LATCH grasp: only if the hand is actually AT the plug (proximity gate), and
                     # keep the plug's current pose relative to the hand (no snap/teleport/flip).
                     expect = p_w + args.grasp_along_cord * cord_world   # plug pos if perfectly grasped
@@ -1046,11 +1356,12 @@ def main() -> None:
                     cq0 = list(cq_p)
                     grasped = False
                     print(f"[eval] RELEASED at step {step}")
-                if grasped:
-                    cp_p = p_w + np.asarray(quat_rotate_wxyz(q_w, latch_p))
-                    cq_p = quat_mul_wxyz(list(q_w), latch_q)
-                else:
-                    cp_p, cq_p = cp0, cq0
+                if live is None:
+                    if grasped:
+                        cp_p = p_w + np.asarray(quat_rotate_wxyz(q_w, latch_p))
+                        cq_p = quat_mul_wxyz(list(q_w), latch_q)
+                    else:
+                        cp_p, cq_p = cp0, cq0
                 poses = scene_poses(bqe)
                 poses[2] = static_pose(cp_p, cq_p, conn_anchor)
                 if _tail:
@@ -1066,7 +1377,7 @@ def main() -> None:
                     chunk, k = np.asarray(res["actions"]), 0
                 a = np.array(chunk[k], dtype=np.float64); k += 1   # copy: msgpack arrays are read-only
                 srel = np.asarray(quat_rotate_wxyz(jinv, np.asarray(cp_p) - np.asarray(jack_pos)))
-                y_sock = float(srel[1])                            # socket-frame insertion depth (mouth=0)
+                y_sock = float(srel[1]) + _y_off                   # insertion depth (mouth=0; see _y_off)
                 lat = float(np.linalg.norm([srel[0], srel[2]]))    # socket-frame lateral offset
                 tr["eef_w"].append(np.asarray(p_w, float))         # pose BEFORE this step's action
                 tr["eef_q"].append(np.asarray(q_w, float))
@@ -1078,13 +1389,39 @@ def main() -> None:
                 tr["grip"].append(grip)
                 tr["dpos"].append(a[:3].copy())
                 tr["drot"].append(a[3:6].copy())
-                p_b = np.asarray(p_b) + a[:3]
-                xq = _Rot.from_rotvec(a[3:6]).as_quat()            # xyzw
-                q_b = quat_mul_wxyz(list(q_b), [xq[3], xq[0], xq[1], xq[2]])
-                grip = float(np.clip(a[6], 0.0, 1.0))
-                if grasped and y_sock >= 0.011 and not seated:
-                    seated, seat_step = True, step
-                    break
+                if live is not None:
+                    # PHYSICS mode: the action goes to the env, and the next pose is whatever the
+                    # arm+contact actually achieved -- NOT the commanded integral. A jam or a
+                    # slipping grasp shows up here as the hand no longer tracking the command.
+                    if _teacher is not None:
+                        live.step_normalised(live.teacher_action(_teacher))
+                    else:
+                        # pass the CURRENT wrist orientation so the grasp-point delta is
+                        # re-referenced to the wrist (see LiveEnv.step)
+                        _bql = live.env.state_0.body_q.numpy()[live.wrist]
+                        live.step(a, grasp_offset=grasp_offset,
+                                  wrist_quat_wxyz=[_bql[6], _bql[3], _bql[4], _bql[5]])
+                    live.log(step / float(args.fps))
+                    _e, _c = live.seat_poses()
+                    _pw, _qw = _to_world(_e)
+                    p_b, q_b = eef_world_to_base(
+                        np.asarray(_pw, float) + quat_rotate_wxyz(_qw, grasp_offset),
+                        quat_mul_wxyz(list(_qw), list(grasp_align)), args.base_pos, base_quat)
+                    _cp, _cq = _to_world(_c)
+                    _live_conn = (_cp, quat_mul_wxyz(list(_cq), conn_align))
+                    grip = float(np.clip(a[6], 0.0, 1.0))
+                    if live.seated and not seated:
+                        seated, seat_step = True, step
+                        print(f"[eval] SEATED in physics (hold {live.hold}) at step {step}")
+                        break
+                else:
+                    p_b = np.asarray(p_b) + a[:3]
+                    xq = _Rot.from_rotvec(a[3:6]).as_quat()            # xyzw
+                    q_b = quat_mul_wxyz(list(q_b), [xq[3], xq[0], xq[1], xq[2]])
+                    grip = float(np.clip(a[6], 0.0, 1.0))
+                    if grasped and y_sock >= 0.011 and not seated:
+                        seated, seat_step = True, step
+                        break
                 if step % 30 == 0:
                     print(f"[eval] step {step}: grip {grip:.2f} grasped={grasped} "
                           f"plug y_sock {y_sock * 1000:+.1f}mm", flush=True)
@@ -1117,6 +1454,8 @@ def main() -> None:
                 json.dump(result, f, indent=2)
             np.savez(os.path.join(args.out, "trace.npz"), tbl_top=tbl_top, tbl_lo=tbl_wlo,
                      tbl_hi=tbl_whi, jack=np.asarray(jack_pos), **T)
+            if live is not None:
+                live.finish()
             if not args.no_preview and frames:
                 _save(frames, args.out, smoke=False, fps=args.fps)
             if gl is not None:
@@ -1180,7 +1519,7 @@ def main() -> None:
             for j in arm_coords:                                     # hand off to insertion at the grasp pose,
                 jq[j] = q_grasp[j]                                    # jaws closed on the connector
             for idx, ratio in handles.gripper_coupling:
-                jq[idx] = ratio * GRIPPER_THETA_CLOSED
+                jq[idx] = ratio * grip_theta
             if args.grasped_only:
                 print("[approach] --grasped-only: arm at grasp pose, jaws closed (approach NOT recorded)")
             else:
@@ -1297,6 +1636,8 @@ def main() -> None:
             f"{k}: {v:.1f}s ({v / nfr * 1000:.0f}ms/fr, {100 * v / max(ptot, 1e-9):.0f}%)"
             for k, v in prof.items()))
         print(f"[replay] done: {len(frames)} frame(s) -> {args.out}")
+        if relight is not None:
+            relight.close()
         if gl is not None:
             gl.close()
         return

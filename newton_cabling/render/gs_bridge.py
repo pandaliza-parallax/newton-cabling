@@ -257,9 +257,14 @@ class NewtonGSClient:
 
         full_plys = ([bg_ply] if self.has_bg else []) + self.ply_paths
         ttw = [False] * len(full_plys)
-        init_T = {
-            k: [([0.0, 0.0, 0.0], [1.0, 0.0, 0.0, 0.0]) for _ in full_plys] for k in self.env_keys
-        }
+        # bg_pose must ride the SETUP transform: the app applies it once at setup
+        # (GSCompositer transform_bg=True) and IGNORES index 0 in every UPDATE
+        # (_dynamic_update include_background=False). Identity here = the ply's own
+        # baked frame. NOTE a changed bg_pose therefore needs a renderer restart,
+        # same as any splat swap (SETUP is cached by count).
+        init_entries = ([(list(self.bg_pose[0]), list(self.bg_pose[1]))] if self.has_bg else []) \
+            + [([0.0, 0.0, 0.0], [1.0, 0.0, 0.0, 0.0]) for _ in self.ply_paths]
+        init_T = {k: list(init_entries) for k in self.env_keys}
         pid = secrets.token_hex(4)
         K = self._K
         setup = {
