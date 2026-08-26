@@ -27,6 +27,8 @@ GRASP_PROTRUDE="0.015"       # m past the fingertips
 GRASP_ALONG_CORD="0.027"     # m back along the cord axis (jaws land behind the plug anchor)
 
 # JACK (socket) world position (m) — the insertion target the trajectory is anchored to.
+# z = 0.835: jack CENTER 50mm above the tabletop (0.785). (Briefly 0.815/30mm on 2026-07-30,
+# reverted same day.)
 JACK_POS="0.295 -0.876 0.835"
 
 # ── v2 jerk fix (see HANDOFF_JERK_ARTIFACT.md) ────────────────────────────────────────────────
@@ -70,8 +72,10 @@ HEIGHT="480"
 DUMP_SIZE="512"              # saved image/wrist_image size (px, square). Was 224. (pi0.5 resizes to 224 at train)
 # Global brightness on the rendered RGB (GS has no runtime lights). GAMMA>1 lifts shadows (plug
 # interior); GAIN scales overall. Blank = off. Try RENDER_GAMMA="1.8" first.
-RENDER_GAMMA="1.8"
-RENDER_GAIN=""
+# ${VAR:-default} so a caller's env override survives this file being sourced
+# (a plain assignment silently clobbered per-run RENDER_GAMMA overrides).
+RENDER_GAMMA="${RENDER_GAMMA:-1.8}"
+RENDER_GAIN="${RENDER_GAIN:-}"
 # Third (SIDE +x) camera -> 3-up FRONT|SIDE|WRIST stitch. SIDE_CAM=1 to enable.
 SIDE_CAM="1"
 SIDE_ELEV=""                 # deg above level (blank = same as ELEV); ignored when SIDE_Z is set

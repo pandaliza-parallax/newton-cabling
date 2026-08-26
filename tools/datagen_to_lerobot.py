@@ -16,10 +16,16 @@ Output goes to $HF_LEROBOT_HOME/<repo_id> (default ~/.cache/huggingface/lerobot)
 import argparse
 import glob
 import os
+import random
 import shutil
+import sys
+import zlib
 
 import imageio.v2 as imageio
 import numpy as np
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from prompt_variations import sample_prompt  # noqa: E402
 
 try:  # lerobot >= ~0.4 dropped the `common` subpackage; openpi's pin still has it
     from lerobot.common.datasets.lerobot_dataset import HF_LEROBOT_HOME, LeRobotDataset
@@ -32,7 +38,8 @@ STATE_DIM, ACTION_DIM = 10, 7
 
 
 def main(raw: str, repo_id: str, push_to_hub: bool, limit: int | None,
-         traj_dir: str = "", truncate_after_seat: int = 20) -> None:
+         traj_dir: str = "", truncate_after_seat: int = 20,
+         fixed_prompt: bool = False) -> None:
     ep_dirs = sorted(d for d in glob.glob(os.path.join(raw, "ep_*")) if os.path.isdir(d))
     # only complete episodes (state + both cams with matching frame counts)
     complete = []
@@ -67,12 +74,22 @@ def main(raw: str, repo_id: str, push_to_hub: bool, limit: int | None,
             "state": {"dtype": "float32", "shape": (STATE_DIM,), "names": ["state"]},
             "actions": {"dtype": "float32", "shape": (ACTION_DIM,), "names": ["actions"]},
         },
-        image_writer_threads=10,
-        image_writer_processes=5,
+        # threads-only: the 5-proc x 10-thread writer pool deadlocked at the encode stage
+        # under load (drmix_1000 conversion, 2026-08-18 — futex-parked with idle writers).
+        image_writer_threads=8,
+        image_writer_processes=0,
     )
 
     n_frames = 0
     for ep_dir in complete:
+        # one stable prompt per episode, varied across episodes. crc32 (not hash():
+        # string hashes are salted per process) keeps the episode->prompt map
+        # reproducible across re-conversions.
+        if fixed_prompt:
+            task = PROMPT
+        else:
+            rng = random.Random(zlib.crc32(os.path.basename(ep_dir).encode()))
+            task = sample_prompt(rng)
         states = np.load(os.path.join(ep_dir, "state.npy"))
         actions = np.load(os.path.join(ep_dir, "action.npy"))
         imgs = sorted(glob.glob(os.path.join(ep_dir, "image", "frame_*.png")))
@@ -102,7 +119,7 @@ def main(raw: str, repo_id: str, push_to_hub: bool, limit: int | None,
                 "wrist_image": imageio.imread(wrists[i]),
                 "state": states[i].astype(np.float32),
                 "actions": actions[i].astype(np.float32),
-                "task": PROMPT,
+                "task": task,
             })
         dataset.save_episode()
         n_frames += len(imgs)
@@ -125,6 +142,10 @@ if __name__ == "__main__":
                     help="keep this many frames after the plug seats, drop the static tail "
                          "(-1 = keep full episodes)")
     ap.add_argument("--push_to_hub", action="store_true")
+    ap.add_argument("--fixed_prompt", action="store_true",
+                    help="use the single legacy PROMPT instead of per-episode "
+                         "prompt_variations paraphrases")
     args = ap.parse_args()
     main(args.raw, args.repo_id, args.push_to_hub, args.limit,
-         traj_dir=args.traj_dir, truncate_after_seat=args.truncate_after_seat)
+         traj_dir=args.traj_dir, truncate_after_seat=args.truncate_after_seat,
+         fixed_prompt=args.fixed_prompt)
