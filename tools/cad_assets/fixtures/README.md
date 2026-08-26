@@ -10,8 +10,13 @@ McMaster STEP.
 ## Files
 | file | what |
 |---|---|
-| `jack_fixture.stl` / `.obj` | the fixture — print this (58.8 × 63.8 × 32.8 mm, 55.6 cm³) |
+| `jack_fixture.stl` / `.obj` | the fixture — print this (104 × 124 × 120 mm, 1189 cm³ solid) |
 | `jack_fixture_preview.png`  | top-down + XZ/YZ sections with the jack nested |
+
+**Envelope = 4× the jack's bbox in every axis** (`JACK_MULT = 4.0` in the build
+script): X/Y grow the base-plate ears, Z grows the base downward into a tall
+pedestal. The jack pocket, flange recess, and all clearances are **unscaled** —
+they stay carved to the real part.
 
 ## How it holds the jack
 The jack **drops in from the top** and is located by two stacked features:
@@ -27,11 +32,12 @@ The jack **drops in from the top** and is located by two stacked features:
 A **rear feed-through hole** (16 × 14 mm) through the base plate keeps the coupler's
 back open (mating cable can pass) and lines up under the pocket.
 
-**Lift-out (+Z) is intentionally open.** A single *rigid* printed body cannot trap the
-flange from above — a closed capture needs either a second part or a snap/flex feature.
-In practice nothing lifts the jack: plug removal releases via the plug's own latch, and
-the insertion load pushes *down* into the seat. If you later want positive retention,
-the options are a bolt-on clamp cap (2 parts) or integrated snap fingers.
+**Positive retention: the jack bolts down.** The 1422N17's flange has two Ø3.5 mm
+screw holes (diagonal corners, at ±9.5 / ∓12 mm); the ledge has matching **Ø2.5 ×
+12 mm pilot holes** (auto-located from the STEP at build time). Drive **2 × M3
+self-tapping screws** through the flange into the ledge and the jack cannot lift out.
+Without the screws it still works as a gravity drop-in: plug removal releases via the
+plug's own latch, and the insertion load pushes *down* into the seat.
 
 ## Verified against the real STEP
 - **0/5000** jack points intrude the fixture → clean drop-in with real clearance
@@ -42,17 +48,21 @@ the options are a bolt-on clamp cap (2 parts) or integrated snap fingers.
   not a hole; every slicer handles it.
 
 ## Hardware
-**4 × M5** cap-screws, fixture → bench/optical table, on a **68.8 × 73.8 mm** rectangle
-(ear centres at ±34.4 / ±36.9 mm). Top counterbores (Ø10 × 4 mm) recess the heads.
+**4 × M5** cap-screws, fixture → bench/optical table, on a **71.4 × 83.8 mm** rectangle
+(hole centres at ±35.7 / ±41.9 mm). The Ø10 counterbores run **85.2 mm deep** so the
+screw threads through only the last 8 mm of the base (`MOUNT_GRIP`) — standard-length
+M5 screws work; drive them with a ≥100 mm 4 mm hex key.
 
 ## Print
 - **Orientation:** base plate flat on the bed, pocket opening up. **No supports** —
   the pocket opens upward, its taper is only ~16° from vertical, and the counterbores
   open upward.
 - **Settings:** 0.2 mm layers, ≥4 perimeters / ≥30 % infill (it's a load-bearing jig).
-  PLA or PETG; the ~0.4 mm fit tolerance suits FDM.
+  PLA or PETG; the ~0.4 mm fit tolerance suits FDM. The body is a 93 mm-tall solid
+  block — infill (not solid plastic) keeps the print manageable (~350–450 g at 30 %).
 - **Fit too tight/loose?** Change `PITCH` / `DIL_ITERS` (body clearance ≈ their product)
-  or `FLANGE_CL`, then re-run.
+  or `FLANGE_CL`, then re-run. Overall size is `JACK_MULT` (envelope multiple of the
+  jack bbox per axis; 4.0 → 104 × 124 × 120 mm).
 
 ## Rebuild / tune
 ```
@@ -61,3 +71,17 @@ cd newton-cabling
 ```
 All dims (clearances, wall, base plate, screw sizes) are tunables at the top of the
 script; the jack's flange/body/collar geometry is measured from the STEP at build time.
+
+## Sim-side twin (Newton)
+`build_jack_fixture_usd.py` bakes `jack_fixture.stl` into the sim's SOCKET frame
+(`newton_cabling/assets/jack_fixture_rj45.usd`), registering `jack_seated.stl`
+against `cad_rj45.usd`'s `/World/Socket` (same STEP, exact rotation chain; only the
+translation is solved — lateral residual ~0.01 mm). The env mounts it with
+`RigidCableVecEnv(..., jack_fixture=True)` / `gen_trajectories --jack-fixture` as a
+second shape on the kinematic jack body, so per-episode placement and `--jack-yaw`
+DR carry it automatically. In that frame the sleeve's front face sits 3.2 mm behind
+the jack mouth (collar proud), base pedestal extending +y (away from the arm).
+Registration preview: `jack_fixture_usd_preview.png`.
+```
+.venv/bin/python tools/cad_assets/build_jack_fixture_usd.py
+```

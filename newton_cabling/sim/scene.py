@@ -125,6 +125,26 @@ def load_connector_meshes(spec: ConnectorSpec) -> ConnectorMeshes:
     )
 
 
+def load_fixture_mesh(
+    spec: ConnectorSpec,
+    *,
+    asset_name: str = "jack_fixture_rj45.usd",
+    sdf_resolution: int | None = None,
+) -> LoadedMesh:
+    """The 3D-print bench fixture, pre-baked into the socket frame by
+    ``tools/cad_assets/build_jack_fixture_usd.py`` — add it to the jack body with an
+    identity local transform and it sits flush around the socket mesh.
+
+    ``sdf_resolution`` defaults to the spec's; the same voxel count over the
+    fixture's ~4x larger bbox is coarser in mm, which is fine for the incidental
+    pad/cable/plug contacts the fixture sees (nothing seats against it).
+    """
+    usd_path = resolve_asset_path(asset_name)
+    stage = Usd.Stage.Open(usd_path)
+    resolution = spec.contact.sdf_max_resolution if sdf_resolution is None else sdf_resolution
+    return _load_mesh(stage, "/World/Fixture", spec.contact.gap_meters, resolution)
+
+
 def connector_shape_config(spec: ConnectorSpec) -> object:
     """SDF ShapeConfig for the connector surfaces, from the spec's contact params."""
     return newton.ModelBuilder.ShapeConfig(

@@ -9,9 +9,10 @@ The jack drops in from the top and is located to a rigid, repeatable pose by:
   * a FLANGE RECESS above it that seats the flange (the +Z-down insertion stop) and
     laterally captures it; the socket collar is left proud so the plug is accessible.
 A rear feed-through hole keeps the coupler's back open; 4 counterbored holes bolt the
-fixture to a bench.  (Lift-out / +Z is intentionally open -- a single rigid print
-cannot trap the flange from above without a snap feature, and the plug-removal load
-does not lift the jack.)
+fixture to a bench.  The jack itself bolts down through its flange's own two screw
+holes into Ø2.5 pilot holes drilled in the ledge (self-tap M3) -- positive +Z
+retention.  (Without the screws the fit is still a gravity drop-in: a single rigid
+print cannot trap the flange from above without a snap feature.)
 
 Why the pocket is a voxel outer-envelope: the jack has an axial feed-through tunnel,
 so subtracting the raw shell would leave a post inside the rear socket.  We voxelize,
@@ -45,13 +46,17 @@ ENGINE = "manifold"
 CLEAR      = 0.40   # body-pocket clearance (FDM slip fit); = PITCH*DIL_ITERS
 FLANGE_CL  = 0.40   # flange-recess clearance per side
 WALL       = 6.0    # sleeve wall thickness around the flange
-BASE_T     = 6.0    # base plate thickness
-EAR        = 10.0   # base plate overhang beyond the sleeve (bolt ears)
+JACK_MULT  = 4.0    # fixture outer envelope = JACK_MULT * jack bbox, per axis
+                    # (sets base footprint + base thickness; pocket/fit unscaled)
 MOUNT_D    = 5.5    # bolt-down clearance holes (M5)
 MOUNT_CB   = 10.0   # counterbore dia for an M5 socket head
-MOUNT_CBH  = 4.0    # counterbore depth (opens on TOP of the ears)
+MOUNT_GRIP = 8.0    # material left under the screw head (counterbores go the rest
+                    # of the way down, so short standard M5 screws still reach)
 REAR_X     = 16.0   # rear feed-through hole (fits a mating plug + cable)
 REAR_Y     = 14.0
+JACK_SCREWS = True  # bolt the jack down: pilot holes in the ledge under the two
+PILOT_D    = 2.5    #   flange screw holes (auto-located from the STEP); Ø2.5
+PILOT_DEPTH = 12.0  #   self-tap pilot for M3, this deep below the ledge
 PITCH      = 0.20   # voxel pitch for the outer-envelope pocket (mm)
 DIL_ITERS  = 2      # dilation steps -> pocket clearance = PITCH*DIL_ITERS
 
@@ -104,6 +109,20 @@ def measure(m):
     return g
 
 
+def flange_screw_holes(m, g):
+    """Locate the jack flange's screw holes: small (~Ø3.5) closed loops in a
+    cross-section through the flange slab, in world XY."""
+    zmid = 0.5 * (g["flange_bot"] + g["flange_top"])
+    sec = m.section(plane_origin=[0, 0, zmid], plane_normal=[0, 0, 1])
+    holes = []
+    for loop in sec.discrete:
+        span = loop.max(axis=0) - loop.min(axis=0)
+        if 2.0 < span[0] < 5.0 and 2.0 < span[1] < 5.0:
+            c = loop.mean(axis=0)
+            holes.append((float(c[0]), float(c[1])))
+    return holes
+
+
 def pocket_solid(m, z1, pitch=PITCH, iters=DIL_ITERS):
     """The jack's OUTER envelope grown by ~pitch*iters, as ONE solid, cropped to
     z<z1.  Voxelize -> fill each z-slice's holes (closes the feed-through tunnel and
@@ -128,12 +147,22 @@ def build_fixture(m, g):
     fb, ft = g["flange_bot"], g["flange_top"]
     OUT_X = g["flange_x"] + 2 * (FLANGE_CL + WALL)
     OUT_Y = g["flange_y"] + 2 * (FLANGE_CL + WALL)
-    BX, BY = OUT_X + 2 * EAR, OUT_Y + 2 * EAR
-    mx, my = OUT_X / 2 + EAR / 2, OUT_Y / 2 + EAR / 2   # bolt centres, in the ears
 
-    # sleeve up to the flange top + base plate below z=0  -> union = one blank
+    # outer envelope = JACK_MULT * the jack's bbox, per axis.  X/Y grow the base
+    # plate (ears); Z grows the base plate DOWN into a pedestal (the jack stays at
+    # z=0-up so the pocket carve is untouched).
+    jx, jy, jz = m.bounds[1] - m.bounds[0]
+    BX, BY = JACK_MULT * jx, JACK_MULT * jy
+    base_t = JACK_MULT * jz - ft
+    assert BX > OUT_X + 2 * MOUNT_CB and BY > OUT_Y + 2 * MOUNT_CB, \
+        "JACK_MULT too small: no room for the bolt ears"
+    assert base_t >= MOUNT_GRIP + 2, "JACK_MULT too small: base thinner than the grip"
+    mx = OUT_X / 2 + (BX - OUT_X) / 4                   # bolt centres, mid-ear
+    my = OUT_Y / 2 + (BY - OUT_Y) / 4
+
+    # sleeve up to the flange top + base pedestal below z=0  -> union = one blank
     solid = trimesh.boolean.union(
-        [box(OUT_X, OUT_Y, ft, ft / 2), box(BX, BY, BASE_T, -BASE_T / 2)],
+        [box(OUT_X, OUT_Y, ft, ft / 2), box(BX, BY, base_t, -base_t / 2)],
         engine=ENGINE)
 
     # carve: tapered body pocket (0..fb) then the flange recess.  The recess floor
@@ -144,17 +173,28 @@ def build_fixture(m, g):
     solid = solid.difference(
         box(g["flange_x"] + 2 * FLANGE_CL, g["flange_y"] + 2 * FLANGE_CL,
             rh, fb + rh / 2), engine=ENGINE)
-    # rear feed-through slot through the base plate
-    solid = solid.difference(box(REAR_X, REAR_Y, BASE_T + 2, -BASE_T / 2 + 0.5),
+    # rear feed-through slot through the base pedestal
+    solid = solid.difference(box(REAR_X, REAR_Y, base_t + 2, -base_t / 2 + 0.5),
                              engine=ENGINE)
-    # bolt-down holes (through) + TOP counterbores (print support-free base-down)
+    # bolt-down holes (through) + TOP counterbores (print support-free base-down).
+    # The counterbore reaches down to MOUNT_GRIP above the bottom, so the screw
+    # only threads through MOUNT_GRIP mm of plastic regardless of base thickness.
+    cbh = base_t - MOUNT_GRIP
     for sx in (-1, 1):
         for sy in (-1, 1):
-            solid = solid.difference(cyl(MOUNT_D, BASE_T + 2, sx * mx, sy * my,
-                                         -BASE_T / 2), engine=ENGINE)
-            solid = solid.difference(cyl(MOUNT_CB, MOUNT_CBH + 0.5, sx * mx, sy * my,
-                                         -MOUNT_CBH / 2 + 0.25), engine=ENGINE)
-    return solid, dict(OUT_X=OUT_X, OUT_Y=OUT_Y, BX=BX, BY=BY, mx=mx, my=my)
+            solid = solid.difference(cyl(MOUNT_D, base_t + 2, sx * mx, sy * my,
+                                         -base_t / 2), engine=ENGINE)
+            solid = solid.difference(cyl(MOUNT_CB, cbh + 0.5, sx * mx, sy * my,
+                                         -cbh / 2 + 0.25), engine=ENGINE)
+    # jack bolt-down: pilot holes in the ledge under the flange's screw holes
+    # (the jack body steps inward below the flange, so the material there is solid)
+    screw_xy = flange_screw_holes(m, g) if JACK_SCREWS else []
+    for hx, hy in screw_xy:
+        solid = solid.difference(
+            cyl(PILOT_D, PILOT_DEPTH + 1, hx, hy, fb - PILOT_DEPTH / 2 + 0.5),
+            engine=ENGINE)
+    return solid, dict(OUT_X=OUT_X, OUT_Y=OUT_Y, BX=BX, BY=BY, mx=mx, my=my,
+                       base_t=base_t, cbh=cbh, screw_xy=screw_xy)
 
 
 def render(fix, jack, fn):
@@ -203,6 +243,10 @@ def main():
     fix = trimesh.boolean.union([fix], engine=ENGINE)     # clean manifold export
     fix.merge_vertices(); trimesh.repair.fix_normals(fix)
     print("output:")
+    print("  base {BX:.1f}x{BY:.1f}x{base_t:.1f}  bolt centres +/-{mx:.1f}/+/-{my:.1f}"
+          "  counterbore depth {cbh:.1f}".format(**bi))
+    print("  jack screw pilots at", [(round(x, 1), round(y, 1))
+                                     for x, y in bi["screw_xy"]])
     stats("fixture", fix)
     fix.export(os.path.join(OUT, "jack_fixture.stl"))
     fix.export(os.path.join(OUT, "jack_fixture.obj"))
