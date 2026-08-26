@@ -41,7 +41,8 @@ if _HERE not in sys.path:
 
 from newton_cabling.connector import cad_rj45_connector  # noqa: E402
 from newton_cabling.sim.safe_vbd import finalize_for_vbd, new_vbd_builder  # noqa: E402
-from newton_cabling.sim.scene import load_connector_meshes, connector_shape_config  # noqa: E402
+from newton_cabling.sim.scene import (  # noqa: E402
+    load_connector_meshes, load_fixture_mesh, connector_shape_config)
 from newton_cabling.sim.sbot import (  # noqa: E402
     add_sbot, enable_finger_contact, ARM_JOINT_NAMES, WRIST_BODY,
     GRIPPER_COUPLING, FINGER_LINK_BODIES)
@@ -61,11 +62,45 @@ THETA_CABLE = -0.0152       # jaw angle for the 6.5 mm cable, PHYSICAL friction 
 #                             non-collidable anchors; a COLLIDABLE rigid capsule explodes at
 #                             2mm crush), -0.016 -> 6.55mm; linear ~0.26mm/0.001.
 #                             -0.0152 -> ~6.35mm = 0.15mm squeeze on the 6.5mm capsule.
-ARM_PITCH_DEG = 45.0        # ARM approach angle (user's GS-scene reference): the WRIST/fingers
-#                             are pitched 45 deg down-forward about the jaw axis, while the cable
-#                             + connector stay HORIZONTAL in the jaws and the jack face stays
-#                             perpendicular to the ground. The 45 lives in the robot's pose, the
-#                             task geometry stays level — no post-hoc cable/wrist compensation.
+ARM_PITCH_DEG = 48.4        # ARM approach angle, ABSOLUTE FROM VERTICAL (0 = fingers straight
+#                             down, 90 = tool horizontal). Was 45 (the original GS-scene diagonal).
+#                             90 aligns the TOOL with the CABLE: the cable is authored along
+#                             nfw = cross(tool, jaw), i.e. perpendicular to the tool, but the align
+#                             loop then rotates the wrist about the jaw axis to level the hang --
+#                             and from a horizontal tool that levelling brings the two together
+#                             instead of apart. MEASURED: angle(tool, cable) 51.3 deg at pitch 45
+#                             -> 7.4 deg at pitch 90, so the hand sits BEHIND the plug pushing
+#                             along its axis (a real cable insertion) rather than pinching it
+#                             sideways. Also buys clearance: front_room 55.4 -> 77.3 mm.
+#                             The cable + connector stay HORIZONTAL and the jack face stays
+#                             perpendicular to the ground either way.
+#                             CALIBRATED PAIRS (with GRASP_YAW_DEG; the two knobs couple, the
+#                             response is nonlinear -- recalibrate jointly, Jacobian iters on
+#                             seat-pose measurements, under grasp_roll_180=True):
+#                               (48.4, +30.0)  -> seat yaw ~45.5, fingers 45 deg BELOW
+#                                                 horizontal (tool-vs-vertical ~135.4); seats
+#                                                 fast (~step 40). CURRENT.
+#                               (123.7, +44.7) -> seat yaw ~45.6, fingers HORIZONTAL
+#                                                 (tool-vs-vertical ~88.9); slow ALIGN
+#                                                 (~175 frames, seats ~step 190).
+#                             The yawed grasp drags the seat attitude ~0.5-0.7 deg of
+#                             tool-vs-vertical per pitch-deg; per-episode droop scatters the
+#                             seat angles by ~1 deg.
+GRASP_ROLL_DEG = 180.0      # choose the cable/plug side of the tool axis (camera-side grasp)
+GRASP_YAW_DEG = 30.0        # extra yaw of the CABLE about the jaw axis, relative to the legacy
+#                             nfw = cross(tool, jaw) authoring (0 = legacy geometry). The pads
+#                             always squeeze the pad-aligned GRIP BOX (its local rotation
+#                             compensates the body frame), so the physical grasp is unchanged --
+#                             only the cable/plug exits the jaws at a yaw, and the capsule stays
+#                             in the pad mid-plane (fwd_c remains perpendicular to jaw).
+#                             SIGN IS TIED TO grasp_roll_180 (the flip mirrors jaw/nfw, and the
+#                             mirror is NOT symmetric once gravity + hang leveling enter).
+#                             Value is calibrated JOINTLY with ARM_PITCH_DEG -- see the pair
+#                             table in the ARM_PITCH_DEG comment. +30.0 pairs with pitch 48.4
+#                             (seat yaw ~45.5, fingers 45 deg below horizontal). NEGATIVE yaw
+#                             under roll is SICK (-44.7: leveling 11 deg, retilt residual 49
+#                             deg, 25% held) -- do not chase the 135-yaw side there.
+#                             (Under grasp_roll_180=False the response mirrors.)
 GRIP_BACK = 0.050           # m of cable between the grip and the capsule front end
 CABLE_BACK = 0.060          # m of cable sticking out behind the grip
 GRIP_AT = 0.1975            # m wrist->grip along tool: the AG-145 pads' converging FLAT is
@@ -73,6 +108,9 @@ GRIP_AT = 0.1975            # m wrist->grip along tool: the AG-145 pads' converg
 #                             -0.0152 = 0.16mm squeeze). The deformable env's 0.192 sits in
 #                             an 8-10mm-wide region — a rigid capsule there is NOT gripped.
 BOOT = 0.018                # m boot gap: plug FACE this far ahead of the capsule front
+GRIP_Z_OFF = 0.0            # m WORLD-z offset of the authored cable centerline from the
+#                             measured pad-face midpoint (negative = held lower between
+#                             the pads). Keep |off| within the pad flats (~a few mm).
 PAD_INSET = 0.0007          # m each pad box is authored INSIDE the measured pad face: the
 #                             0.15mm face-gap squeeze leaves only ~0.075mm/side penetration,
 #                             and AVBD's ramped penalty at that depth gives ~0.01N of friction
@@ -90,6 +128,14 @@ LAT_CAP = 0.0015            # m max lateral grip correction per control step
 ADV = 0.0008                # m grip advance per step when gated open
 GATE = 0.0025               # m lateral gate for advancing
 MARGIN = 0.003              # m finger-front standoff from the jack mouth plane
+FFA_LAT_R = 0.05            # m: finger verts count toward the mouth-standoff wall only within
+#                             this lateral radius of the insertion LINE. The wall protects the
+#                             JACK (a ~16mm standalone connector), not an infinite panel plane:
+#                             a yawed grasp (GRASP_YAW_DEG) legitimately swings the wrist-side
+#                             knuckles past the mouth plane 100+mm to the SIDE of the connector,
+#                             and the unfiltered max froze all forward motion 15mm short of dock.
+#                             Legacy configs are unaffected: their governing verts are the pad
+#                             tips straddling the cable, well inside 50mm of the line.
 
 # policy residual
 MAX_DPOS = 0.002
@@ -113,7 +159,9 @@ SEAT_OFFSET = 0.003
 SEAT_ANGLE = math.radians(8.0)   # face angle vs settled hang (boot end floats a little)
 EJECT_DIST = 0.15
 
-OBS_DIM = 22
+OBS_DIM = 22  # rotvec q_err (2026-08 A/B vs Q6/25-D under the current grasp geometry: rotvec
+#               reached 28.3% held at stage 0 in 600 from-scratch iters, Q6 never exceeded 1%
+#               across 3 attempts (2 from-scratch, 1 warm-start) -- rotvec is the settled choice
 ACT_DIM = 7
 
 
@@ -142,7 +190,13 @@ class RigidCableVecEnv:
     def __init__(self, n: int, *, seed: int = 0, socket_mu: float = 0.5,
                  residual_scale: float = RESIDUAL_SCALE, ik_iters: int = 2,
                  contact_buffer_per: int = 1024, cable_tilt_deg: float = 0.0,
-                 cable_mesh: bool = False, _dbg_shift: float = 0.0,
+                 cable_mesh: bool = False, connector_usd: str = "cad_rj45.usd",
+                 grasp_roll_180: bool = False, jack_yaw_deg: float = 0.0,
+                 grasp_roll_jitter_deg: float = 0.0,
+                 offset_z_mm: float = 0.0, approach_jitter_mm=None,
+                 offset_uniform_disk: bool = False, jack_fixture: bool = False,
+                 offset_mag_mm: float | None = None,
+                 _dbg_shift: float = 0.0,
                  _dbg_no_pad_collide: bool = False, _dbg_skip_align: bool = False):
         # cable_mesh: use a trimesh cylinder (SDF mesh-mesh contact, like the validated plug
         # grasp) instead of a capsule primitive. _dbg_shift: debug-only — author the cable
@@ -163,6 +217,25 @@ class RigidCableVecEnv:
         self.ik_iters = ik_iters
         self.max_steps = 260
         self._rng = np.random.default_rng(seed)
+        # per-episode jack yaw DR: |yaw| <= this about world-z, drawn each reset(). Yaw is
+        # about the gravity axis, so the settled drape is invariant — no re-settle needed.
+        self._jack_yaw_max = math.radians(jack_yaw_deg)
+        self.jack_yaw_ep = np.zeros(n)
+        # per-episode jack placement DR extensions (all default-off; the default rng stream
+        # and jack placement are bit-identical when disabled):
+        #   offset_z_mm       — vertical (nfw-axis) component added to the offset draw
+        #   approach_jitter_mm — (lo, hi) mm: per-episode approach distance instead of the
+        #                        curriculum constant; front_room_ep becomes per-env
+        #   offset_uniform_disk — mag = R*sqrt(U) (uniform over the disk) instead of U(0,R),
+        #                         which over-represents small offsets
+        self._off_z = offset_z_mm / 1000.0
+        self._app_jit = (None if approach_jitter_mm is None
+                         else (approach_jitter_mm[0] / 1000.0, approach_jitter_mm[1] / 1000.0))
+        self._disk = bool(offset_uniform_disk)
+        # optional override of the curriculum lateral-offset magnitude (far-recovery
+        # starts); survives set_stage(), which normally resets _mag from CURRICULUM
+        self._mag_override = None if offset_mag_mm is None else float(offset_mag_mm) / 1000.0
+        self.approach_ep = np.full(n, np.nan)
         # TILTED-CABLE variant: instead of leveling the hang to horizontal, the align loop
         # targets this pitch. Positive = the connector end DROOPS below horizontal. The jack
         # stays world-level regardless (user spec), so the policy must rotate the wrist to
@@ -173,6 +246,15 @@ class RigidCableVecEnv:
             self.cable_tilt = np.radians(self._rng.uniform(*cable_tilt_deg, n))
         else:
             self.cable_tilt = np.full(n, math.radians(cable_tilt_deg))
+        # per-env grasp-roll DR: GRASP_ROLL_DEG +- jitter about the TOOL axis, rolling the
+        # complete hand+cable assembly (grip bit-identical; the drape re-settles to the new
+        # gravity direction). Baked into the settled snapshot -> per ENV, not per episode.
+        # Drawn only when enabled so the rng stream (and golden baselines) stay untouched.
+        if grasp_roll_jitter_deg > 0.0:
+            self.grasp_roll_ep = GRASP_ROLL_DEG + self._rng.uniform(
+                -grasp_roll_jitter_deg, grasp_roll_jitter_deg, n)
+        else:
+            self.grasp_roll_ep = np.full(n, GRASP_ROLL_DEG)
 
         # ── build: N arms, home pose, cable grip ─────────────────────────────
         # rigid_gap 0.005 (deformable env value) wraps every rigid shape in a 5mm contact
@@ -228,18 +310,51 @@ class RigidCableVecEnv:
             Rc = (Rot.from_rotvec(ax / s_ * math.atan2(s_, float(np.dot(tool, tool_t))))
                   if s_ > 1e-9 else Rot.identity())
             wq_t[i] = (Rc * Rot.from_quat(bq[wristsF[i], 3:7])).as_quat()
+            # The grasp side is a free choice at pickup time. Roll the complete wrist
+            # 180 deg about the gripper tool axis: tool direction and wrist origin stay
+            # fixed, while jaw/nfw flip signs and the held plug moves to the camera side.
+            # Do this before IK/authoring so the physical fingers, rigid body, recorded EEF
+            # trajectory, and rendered wrist camera all share the same convention.
+            wq_t[i] = (Rot.from_rotvec(tool_t * math.radians(self.grasp_roll_ep[i]))
+                       * Rot.from_quat(wq_t[i])).as_quat()
         fk_jq = fk_m.joint_q.numpy().copy()
         fk_jq, ik_ep, _ = fk_ik.solve(fk_jq, wp_t, wq_t, iters=100)
         if ik_ep.max() > 2e-3:
-            print(f"[rigid_cable_env] WARNING: arm-pitch IK residual {ik_ep.max()*1000:.1f}mm")
+            # Every arm is IDENTICAL modulo grid translation and every target is the same
+            # pose relative to its base, so one converged joint solution is valid for all
+            # slots. Individual slots still diverge: near the workspace edge (large
+            # ARM_PITCH_DEG) float-path differences send a slot's DLS into a folded branch
+            # (measured 412.7mm residual on 1/32 slots -- and grip48's one bad slot SEATED
+            # 13-17mm off while passing the held gate, silently poisoning the dataset).
+            # Broadcast the best-converged slot's solution instead of keeping the fold.
+            best = int(np.argmin(ik_ep))
+            if ik_ep[best] > 2e-3:
+                print(f"[rigid_cable_env] WARNING: arm-pitch IK residual "
+                      f"{ik_ep.max()*1000:.1f}mm (best slot {ik_ep[best]*1000:.1f}mm -- "
+                      f"NO slot converged, broadcast anyway)")
+            best_sol = [fk_jq[fk_qs[arm_j[nm][best]]] for nm in ARM_JOINT_NAMES]
+            for i in range(n):
+                for k_, nm in enumerate(ARM_JOINT_NAMES):
+                    fk_jq[fk_qs[arm_j[nm][i]]] = best_sol[k_]
+            print(f"[rigid_cable_env] arm-pitch IK: {int((ik_ep > 2e-3).sum())}/{n} slots "
+                  f"diverged (max {ik_ep.max()*1000:.1f}mm) -> broadcast slot {best} "
+                  f"({ik_ep[best]*1000:.2f}mm) to all")
         self._arm_pitch_q = np.array([[fk_jq[fk_qs[arm_j[nm][i]]] for nm in ARM_JOINT_NAMES]
                                       for i in range(n)])
         jqw_fk = wp.array(fk_jq, dtype=float, device=fk_m.device)
         newton.eval_fk(fk_m, jqw_fk, fk_m.joint_qd, fk_s)
         bq = fk_s.body_q.numpy()   # ACTUAL approach-pose frames; author from these below
 
-        spec = cad_rj45_connector(friction=socket_mu)
+        # connector_usd: which /World/{Socket,Plug,Latch} USD to load. "scan_rj45.usd" =
+        # the headA scan plug + socket re-carved to fit it (0.66mm seat slop, validated
+        # by the standalone mating test). Same frame conventions as cad_rj45.usd.
+        spec = dataclasses.replace(cad_rj45_connector(friction=socket_mu),
+                                   usd_asset_name=connector_usd)
         meshes = load_connector_meshes(spec)
+        # 3D-print bench fixture around the jack (pre-baked into the socket frame by
+        # build_jack_fixture_usd.py). Added as a SECOND shape on each kinematic jack
+        # body below, so per-episode placement + yaw DR carry it for free.
+        fixture = load_fixture_mesh(spec) if jack_fixture else None
         sbp = np.asarray(meshes.socket.base_position)
         pbp = np.asarray(meshes.plug.base_position)
         self._off_local = sbp - (pbp + np.array([0.0, SEAT_AIM_DY, 0.0]))  # plug-origin -> socket-origin
@@ -286,6 +401,23 @@ class RigidCableVecEnv:
             tool = tipm - wpos; tool /= np.linalg.norm(tool)
             jaw = Rw @ np.array([0., 1., 0.]); jaw -= tool * (jaw @ tool); jaw /= np.linalg.norm(jaw)
             nfw = np.cross(tool, jaw); nfw /= np.linalg.norm(nfw)
+            if grasp_roll_180:
+                # Roll the grasp 180 deg about the TOOL axis. The AG-145 is SYMMETRIC under
+                # this (two identical pads, and the pad/grip boxes are 180-symmetric about
+                # tool), so the physical grip is bit-for-bit unchanged -- but the cable, which
+                # is authored along +nfw, swings to the OTHER side of the hand.
+                # WHY: the eye-in-hand camera is mounted at wrist_3 +z (t_cam z = +119mm) while
+                # the default frame hangs the plug at wrist_3 z = -68mm -- opposite sides, so
+                # the camera->plug sight-line passes within 11mm of the tool axis, straight
+                # through the closed jaws. Measured: the plug/jack interface is INSIDE the
+                # frustum (15 deg off-axis) yet occluded by the fingers for every frame of
+                # every episode, making the wrist stream useless for BC. Rolling puts the plug
+                # on the camera's side and the sight-line never crosses the jaw plane.
+                # The align loop is INVARIANT under this: sag = asin(body_y . z) flips sign
+                # AND the correction axis (jaw) flips, so the two cancel and it converges
+                # exactly as before. z_v stays world-up, so the plug still hangs un-rolled.
+                jaw = -jaw
+                nfw = -nfw
             # grip point = MEASURED midpoint between the two pads' inner faces (fixed-tool-
             # line placement left the capsule 1.6-3.2mm off the pads — not gripped at all).
             # Pad region: verts beyond GRIP_AT-0.02 along tool; inner face: the 1mm of verts
@@ -306,7 +438,7 @@ class RigidCableVecEnv:
                 print(f"[rigid_cable_env] measured pad gap {pad_gap*1000:.2f}mm "
                       f"(cable {2*spec.cable_radius_meters*1000:.1f}mm)", flush=True)
             mid = 0.5 * (f1.mean(axis=0) + f2.mean(axis=0))
-            grip_pos = mid + np.array([self._dbg_shift, 0.0, 0.0])
+            grip_pos = mid + np.array([self._dbg_shift, 0.0, GRIP_Z_OFF])
             self.frame.append(dict(tool=tool, jaw=jaw, n=nfw, grip=grip_pos, tipm=tipm))
             # PAD PROXIES: standalone kinematic free bodies (jack-like) with primitive box
             # shapes at the measured pad faces, carried by the wrist via _sync_pad_anchors.
@@ -344,10 +476,12 @@ class RigidCableVecEnv:
             # with the grip box locking roll the error is permanent; measured ang 32.6 deg
             # at t=0). Author the plug UP = world up (projected +nfw-orthogonal); the grip
             # box below gets the opposite local roll so its flats still meet the pad faces.
+            fwd_c = (Rot.from_rotvec(jaw * math.radians(GRASP_YAW_DEG)).apply(nfw)
+                     if GRASP_YAW_DEG else nfw)
             up_ = np.array([0.0, 0.0, 1.0])
-            z_v = up_ - float(up_ @ nfw) * nfw; z_v /= np.linalg.norm(z_v)
-            jaw_v = np.cross(nfw, z_v)
-            Rp = np.column_stack([jaw_v, nfw, z_v]); q_plug = Rot.from_matrix(Rp).as_quat()
+            z_v = up_ - float(up_ @ fwd_c) * fwd_c; z_v /= np.linalg.norm(z_v)
+            jaw_v = np.cross(fwd_c, z_v)
+            Rp = np.column_stack([jaw_v, fwd_c, z_v]); q_plug = Rot.from_matrix(Rp).as_quat()
             R_grip = np.column_stack([jaw, nfw, z_p])
             q_gb = Rot.from_matrix(Rp.T @ R_grip).as_quat()   # grip-box local: pad-aligned
             body = b.add_body(xform=wp.transform(wp.vec3(*grip_pos), wp.quat(*q_plug)),
@@ -414,6 +548,12 @@ class RigidCableVecEnv:
             b.body_flags[jb] = int(newton.BodyFlags.KINEMATIC)
             self.jack_body.append(jb)
             jack_shape_of_env[js] = i
+            if fixture is not None:
+                # identity local xform: the fixture verts are already in the socket frame.
+                # Registering it in jack_shape_of_env makes pad<->fixture contact count as
+                # a violation, same as pad<->jack (expected to be a no-op at sane grips).
+                fx = b.add_shape_mesh(jb, mesh=fixture.mesh, cfg=connector_shape_config(spec))
+                jack_shape_of_env[fx] = i
 
         # map finger shapes -> env by body ownership (arm order)
         for s in all_finger_shapes:
@@ -603,6 +743,9 @@ class RigidCableVecEnv:
             x_n = np.cross(self.ins[i], z_n); x_n /= np.linalg.norm(x_n)
             self.seat_qw[i] = Rot.from_matrix(
                 np.column_stack([x_n, self.ins[i], z_n])).as_quat()
+        # unyawed bases: reset() rebuilds ins/seat_qw from these when jack-yaw DR is on
+        self._ins0 = self.ins.copy()
+        self._seat_qw0 = self.seat_qw.copy()
         # finger mesh verts in BODY frame (env 0; identical geometry across arms) — kept so
         # the finger front extent can be RE-measured after every retilt (the wrist rotation
         # swings the fingertips ~20mm along ins, so ffa is snapshot-dependent)
@@ -674,12 +817,19 @@ class RigidCableVecEnv:
         return pos, quat
 
     def _measure_ffa(self, bqn):
-        """Finger front extent along ins (env 0), at the CURRENT pose."""
+        """Finger front extent along ins (env 0), at the CURRENT pose. Only verts within
+        FFA_LAT_R of the insertion line through the reference face count (see FFA_LAT_R)."""
         ffa = -1e9
+        ref = self.face_ref[0]; ins = self.ins[0]
         for bidx, vb in self._ffa_pts:
             Rb = Rot.from_quat(bqn[bidx][3:7]).as_matrix()
             vw = (Rb @ vb.T).T + bqn[bidx][:3]
-            ffa = max(ffa, float((vw @ self.ins[0]).max()))
+            rel = vw - ref
+            along = vw @ ins
+            lat = np.linalg.norm(rel - (rel @ ins)[:, None] * ins, axis=1)
+            near = lat < FFA_LAT_R
+            if near.any():
+                ffa = max(ffa, float(along[near].max()))
         return ffa
 
     def _take_snapshot(self):
@@ -736,6 +886,8 @@ class RigidCableVecEnv:
     def set_stage(self, stage: int):
         self.stage = int(np.clip(stage, 0, self.num_stages - 1))
         self._approach, self._mag = CURRICULUM[self.stage]
+        if getattr(self, "_mag_override", None) is not None:
+            self._mag = self._mag_override
         # tilt curriculum: droop scales with the stage (0 at stage 0 -> full at the top).
         # A stage change re-runs the align to the scaled per-env droop and re-snapshots;
         # callers always reset() after set_stage(), which restores from the new snapshot.
@@ -774,16 +926,37 @@ class RigidCableVecEnv:
         self.jq = self._snap_jq.copy()
         # per-episode jack placement: seat = settled face + APPROACH*ins + lateral offset
         ang = self._rng.uniform(0, 2 * np.pi, n)
-        mag = self._rng.uniform(0, self._mag, n)
+        if self._disk:
+            mag = self._mag * np.sqrt(self._rng.uniform(0.0, 1.0, n))
+        else:
+            mag = self._rng.uniform(0, self._mag, n)
+        zoff = (self._rng.uniform(-self._off_z, self._off_z, n) if self._off_z > 0.0
+                else np.zeros(n))
+        if self._app_jit is not None:
+            app = self._rng.uniform(self._app_jit[0], self._app_jit[1], n)
+        else:
+            app = np.full(n, self._approach)
+        self.approach_ep = app.copy()
+        # per-episode jack yaw about world-z: rotates the seat frame + insertion axis, so in
+        # the saved seat-relative episode it reads as a yawed GRIPPER start. Drawn only when
+        # enabled to keep the rng stream (and golden baselines) untouched at yaw 0.
+        if self._jack_yaw_max > 0.0:
+            yaw = self._rng.uniform(-self._jack_yaw_max, self._jack_yaw_max, n)
+            self.jack_yaw_ep = np.degrees(yaw)
+            for i in range(n):
+                Rz = Rot.from_euler("z", yaw[i])
+                self.ins[i] = Rz.apply(self._ins0[i])
+                self.seat_qw[i] = (Rz * Rot.from_quat(self._seat_qw0[i])).as_quat()
         # curriculum approach: the jack sits closer at early stages (near-seated bootstrap);
         # the standoff room shrinks by the same amount the mouth moves closer.
-        self.front_room_ep = self.front_room - (APPROACH - self._approach)
+        self.front_room_ep = self.front_room - (APPROACH - app)   # (n,) when jittered
         for i in range(n):
             off = mag[i] * (math.cos(ang[i]) * self.frame[i]["jaw"]
-                            + math.sin(ang[i]) * self.frame[i]["tool"])
+                            + math.sin(ang[i]) * self.frame[i]["tool"]) \
+                + zoff[i] * self.frame[i]["n"]
             # seat from the LEVEL reference face (== face0 in the level env): the tilted
             # variant keeps the level env's jack geometry, only the start hang differs
-            self.seat_pos[i] = self.face_ref[i] + self._approach * self.ins[i] + off
+            self.seat_pos[i] = self.face_ref[i] + app[i] * self.ins[i] + off
             Rs = Rot.from_quat(self.seat_qw[i])            # LEVEL world frame, not the sagged hang
             jack_p = self.seat_pos[i] + Rs.apply(self._off_local)
             qs = self.jack_qs[i]
@@ -881,6 +1054,13 @@ class RigidCableVecEnv:
         face, faceq = self._face_pose(bqn)
         e = (face - self.seat_pos) * 50.0
         lin = bqd[self.rod_front, 0:3]
+        # rotvec q_err, scaled 3x. A 2026-07 diagnostic on scan_v3 (trained under the OLD
+        # grasp geometry) suspected this representation of causing a post-seat twist
+        # divergence, motivating a Q6 (6-D continuous rotation encoding) ablation -- but the
+        # twist was never reproduced in any real rollout, and a clean from-scratch A/B under
+        # the CURRENT grasp geometry (scratch_cad_rotvec_v1 vs scratch_cad_v1, identical
+        # recipe/connector otherwise) showed rotvec reaching 28.3% held at stage 0 in 600
+        # iters while Q6 never exceeded 1% across 3 attempts. Settled: rotvec.
         q_err = (Rot.from_quat(self.seat_q).inv() * Rot.from_quat(faceq)).as_rotvec() * 3.0
         angv = bqd[self.rod_front, 3:6]
         obs = np.concatenate([eefp, R6, grip, e, lin, q_err, angv], axis=1)

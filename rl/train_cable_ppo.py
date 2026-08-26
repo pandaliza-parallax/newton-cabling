@@ -64,6 +64,9 @@ def main():
     ap.add_argument("--tilt", type=float, default=8.0,
                     help="max droop deg at the TOP stage; per-env uniform in [0, tilt], scaled "
                          "by stage/(num_stages-1) (tilt curriculum; 0 = level only)")
+    ap.add_argument("--tilt-lo", type=float, default=0.0,
+                    help="LOWER edge of the per-env droop DR (deg). Raise (e.g. 4) to bias "
+                         "training into the hard full-droop corner instead of uniform 0..tilt")
     ap.add_argument("--bc-iters", type=int, default=15,
                     help="teacher rollouts for BC warm-start (0 = pure PPO from scratch)")
     ap.add_argument("--bc-epochs", type=int, default=50)
@@ -81,6 +84,8 @@ def main():
     ap.add_argument("--advance-held", type=float, default=0.55,
                     help="advance the curriculum when the rolling held fraction exceeds this")
     ap.add_argument("--advance-window", type=int, default=10)
+    ap.add_argument("--connector-usd", default="cad_rj45.usd",
+                    help="connector asset for the RIGID env (e.g. scan_rj45.usd)")
     ap.add_argument("--rigid", action="store_true",
                     help="use RigidCableVecEnv (solid cable, physical friction grasp) "
                          "instead of the deformable CableInsertVecEnv")
@@ -102,7 +107,7 @@ def main():
                      "mean_depth_mm", "viol_frac", "approx_kl", "entropy", "pol_loss",
                      "val_loss", "steps_per_s"])
 
-    tilt = (0.0, args.tilt) if args.tilt > 0 else 0.0
+    tilt = (args.tilt_lo, args.tilt) if args.tilt > 0 else 0.0
     if args.rigid:
         from rigid_cable_env import RigidCableVecEnv as EnvCls
     else:
@@ -110,8 +115,11 @@ def main():
     print(f"Building {n} {'RIGID' if args.rigid else 'deformable'} cable envs "
           f"(tilt DR {tilt}) ...", flush=True)
     t0 = time.perf_counter()
-    env = EnvCls(n, seed=args.seed, ik_iters=args.ik_iters,
-                 socket_mu=args.socket_mu, cable_tilt_deg=tilt)
+    env_kw = dict(seed=args.seed, ik_iters=args.ik_iters,
+                  socket_mu=args.socket_mu, cable_tilt_deg=tilt)
+    if args.rigid:
+        env_kw["connector_usd"] = args.connector_usd
+    env = EnvCls(n, **env_kw)
     print(f"  built in {time.perf_counter()-t0:.1f}s | obs {env.obs_dim} act {env.act_dim} "
           f"| front_room {env.front_room*1000:.1f}mm", flush=True)
 

@@ -82,6 +82,10 @@ def main():
                     help="append to the out dir instead of clearing stale ep_* dirs first")
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--max-save", type=int, default=500)
+    ap.add_argument("--rigid", action="store_true",
+                    help="use RigidCableVecEnv (solid cable) instead of the deformable env")
+    ap.add_argument("--connector-usd", default="cad_rj45.usd",
+                    help="RIGID env connector asset (e.g. scan_rj45.usd)")
     ap.add_argument("--stochastic", action="store_true",
                     help="sample from the policy instead of the mean -- widens the behaviour "
                          "distribution for BC at the cost of some success rate")
@@ -93,7 +97,12 @@ def main():
 
     # scalar -> np.full(n, tilt) (identical hang every env); tuple -> per-env uniform DR
     tilt = tuple(args.cable_tilt) if len(args.cable_tilt) > 1 else args.cable_tilt[0]
-    env = CableInsertVecEnv(args.envs, seed=args.seed, cable_tilt_deg=tilt)
+    if args.rigid:
+        from rigid_cable_env import RigidCableVecEnv
+        env = RigidCableVecEnv(args.envs, seed=args.seed, cable_tilt_deg=tilt,
+                               connector_usd=args.connector_usd)
+    else:
+        env = CableInsertVecEnv(args.envs, seed=args.seed, cable_tilt_deg=tilt)
     env.set_stage(args.stage)
     ac = None
     if args.checkpoint:
