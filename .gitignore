@@ -33,3 +33,15 @@ runs/
 # ---- Rollout recordings (regenerable; .rrd/.rbl already ignored above) ----
 *.npz
 *.npy
+
+# The golden-regression baseline is NOT a regenerable recording: it pins the
+# kinematic arm path across parent-env edits (tests/test_golden_kinematic.py).
+!tests/golden_kinematic.npz
+
+# ---- Datagen / render output trees (regenerable by tools/render_*.sh, tools/*_pipeline.sh) ----
+datagen_*/
+out_*/
+
+# ---- mesh2splat intermediates: 200MB+ of bake, re-derivable from the scan with
+#      tools/bake_jack_v2.py; nothing in the repo loads them ----
+newton_cabling/assets/ethernet/*_m2s_*.ply
