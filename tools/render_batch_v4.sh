@@ -42,7 +42,15 @@ END=${2:-500}
 REPO=/home/pandaliza/parallax/newton-cabling
 OUTROOT=${OUTROOT:-$REPO/datagen_v4}
 TRAJROOT=${TRAJROOT:-$REPO/cable_traj}       # rl/gen_cable_traj.py output
-EEF_RPY=${EEF_RPY:-"180 0 0"}                # seat-frame -> scene calibration (renderer default)
+# Locked cable seat-frame -> scene calibration. This is an intrinsic XYZ 180deg roll about X;
+# `0 0 180` is a yaw and puts the wrist/camera on the wrong side of the scene.
+EEF_RPY=${EEF_RPY:-"180 0 0"}
+EXPECTED_EEF_RPY="180 0 0"
+if [ "${ALLOW_NONCANONICAL_EEF_RPY:-0}" != "1" ] && [ "$EEF_RPY" != "$EXPECTED_EEF_RPY" ]; then
+  echo "[batch] ERROR: cable_v4 requires EEF_RPY=\"$EXPECTED_EEF_RPY\"; got \"$EEF_RPY\""
+  echo "[batch] Set ALLOW_NONCANONICAL_EEF_RPY=1 only for a deliberate calibration experiment."
+  exit 2
+fi
 # Jack SPLAT facing. The jack mouth is the +z face of its obj frame (jack_anchor 0 0 0.030); with
 # the code's intrinsic-XYZ euler the mouth-normal = R_align.[0,0,1]. v3's 90 0 -180 -> -y (correct
 # for v3's -y approach; proven by v3 working). The cable plug approaches from +y (arm side), so the
@@ -57,6 +65,20 @@ JACK_ALIGN_RPY=${JACK_ALIGN_RPY:-"-90 0 0"}
 # `0 0 0` maps +z -> [0,0,-1] = the plug renders as a VERTICAL rod (a real bug that only became
 # obvious once the longer tail made the long axis visible). Verify against the +z axis, not +y.
 CONN_RPY=${CONN_RPY:-"-90 0 0"}
+# Jack MOUTH anchoring. static_pose() puts splat-local jack_anchor AT --jack-pos, and the
+# renderer ALSO pins the SEAT-frame origin to --jack-pos (line ~793). But --eef-traj feeds a
+# SEAT-relative trajectory whose origin is SEAT_AIM_DY=12mm PAST the mouth, so the default
+# 0.030 (= the splat's own mouth plane) draws the mouth 12mm too far forward and the plug
+# renders flush against the jack instead of seated 12mm inside. 0.030-0.012=0.018 fixes it.
+# (v3 is unaffected: its --plug-traj branch feeds a SOCKET-frame traj whose origin IS the mouth.)
+# Do NOT try to fix this with --jack-pos: it feeds both call sites and cancels exactly.
+JACK_ANCHOR=${JACK_ANCHOR:-"0 0 0.018"}
+# AG-145 driver angle for the CLOSED jaws. The renderer default (GRIPPER_THETA_CLOSED=0.0)
+# pinches them fully shut, which is right for v3 (gripper holds the plug BODY) but wrong here:
+# the rigid cable env grips a 6.5mm CABLE at THETA_CABLE=-0.0152 (measured 6.42mm pad gap).
+# Rendering at 0.0 drives each pad 2.06mm INSIDE the cable and hides ~10mm of the gripped
+# stretch, so the wrist view shows shut jaws with the cable apparently floating past them.
+GRIP_THETA=${GRIP_THETA:-"-0.0152"}
 export PYTHONPATH=/home/pandaliza/parallax/data-generator/sim_engine/DalusPySim
 
 # connector splats: HEAD (RJ45 plug) + TAIL (boot) = the two halves of cad_plug_registered, both
@@ -76,6 +98,8 @@ source "$REPO/tools/datagen_v2_config.sh"
 RENDER_FLAGS=""
 [ -n "${RENDER_GAMMA:-}" ] && RENDER_FLAGS="$RENDER_FLAGS --gamma $RENDER_GAMMA"
 [ -n "${RENDER_GAIN:-}" ]  && RENDER_FLAGS="$RENDER_FLAGS --gain $RENDER_GAIN"
+[ -n "${BG_YAW_DEG:-}" ]   && RENDER_FLAGS="$RENDER_FLAGS --bg-yaw-deg $BG_YAW_DEG"
+[ "${SHADOWS:-0}" = "1" ]  && RENDER_FLAGS="$RENDER_FLAGS --shadows --shadow-mask-scale ${SHADOW_MASK_SCALE:-0.5} --shadow-strength ${SHADOW_STRENGTH:-1.0} --shadow-accum ${SHADOW_ACCUM:-12} --shadow-light-angle ${SHADOW_LIGHT_ANGLE:-12.0}"
 FRONT_FLAGS=""
 [ -n "${FRONT_EYE:-}" ]        && FRONT_FLAGS="$FRONT_FLAGS --eye $FRONT_EYE"
 [ -n "${FRONT_TARGET:-}" ]     && FRONT_FLAGS="$FRONT_FLAGS --target $FRONT_TARGET"
@@ -84,8 +108,49 @@ FRONT_FLAGS=""
 SIDE_FLAGS=""                                     # FRONT + WRIST only (datagen_to_lerobot ignores mirror/side)
 WRIST_USD_FLAG=""
 [ "${WRIST_CAM_FROM_USD:-0}" = "1" ] && WRIST_USD_FLAG="--wrist-cam-from-usd"
+JACK_PLY_FLAG=""                                  # optional jack-splat override (e.g. scaled bake)
+[ -n "${JACK_PLY:-}" ] && JACK_PLY_FLAG="--jack-ply $JACK_PLY"
+FIXTURE_FLAG=""                                   # optional fixture splat riding the jack pose
+[ -n "${FIXTURE_PLY:-}" ] && FIXTURE_FLAG="--fixture-ply $FIXTURE_PLY"
 
 cd "$REPO"
+
+# Refuse trajectories authored before the env-side camera-side grasp roll. Without this check,
+# the batch can complete successfully while rendering the old blind-side wrist view.
+if [ "${ALLOW_LEGACY_TRAJ:-0}" != "1" ]; then
+  .venv/bin/python - "$TRAJROOT" "$START" "$END" <<'PY'
+import json
+import os
+import sys
+
+root, start, end = sys.argv[1], int(sys.argv[2]), int(sys.argv[3])
+bad = []
+for i in range(start, end):
+    ep = os.path.join(root, f"ep_{i:04d}")
+    traj = os.path.join(ep, "eef_traj.npy")
+    if not os.path.isfile(traj):
+        continue
+    meta_path = os.path.join(ep, "meta.json")
+    try:
+        with open(meta_path) as fh:
+            meta = json.load(fh)
+        roll = float(meta["grasp_roll_deg"])
+        if abs(roll - 180.0) > 1e-6:
+            bad.append((i, f"grasp_roll_deg={roll:g}"))
+    except (OSError, KeyError, TypeError, ValueError) as exc:
+        bad.append((i, f"missing/invalid grasp-roll metadata ({exc})"))
+if bad:
+    print("[batch] ERROR: trajectory set is stale or not scripted-camera-side data:")
+    for i, reason in bad[:8]:
+        print(f"[batch]   ep_{i:04d}: {reason}")
+    if len(bad) > 8:
+        print(f"[batch]   ... and {len(bad)-8} more")
+    print("[batch] Regenerate with newton_cabling.scripted_controller.gen_trajectories first.")
+    print("[batch] Use ALLOW_LEGACY_TRAJ=1 only to intentionally render old data.")
+    raise SystemExit(2)
+PY
+fi
+
 # --out is makedirs'd even with --no-preview; point every episode at ONE throwaway dir.
 PREVIEW_TMP=$(mktemp -d /tmp/render_v4_preview.XXXXXX)
 trap 'rm -rf "$PREVIEW_TMP"' EXIT
@@ -102,10 +167,27 @@ mkdir -p "$OUTROOT"
   echo "sbot usd    : $SBOT_USD"
   echo "base/jack   : BASE_POS=$BASE_POS  JACK_POS=$JACK_POS  ARM_HOME=$ARM_HOME_DEG"
   echo "render      : ${WIDTH:-640}x${HEIGHT:-480}  dump $DUMP_SIZE  gamma ${RENDER_GAMMA:-off}"
+  echo "geometry    : EEF_RPY=\"$EEF_RPY\"  JACK_ALIGN_RPY=\"$JACK_ALIGN_RPY\"  JACK_ANCHOR=\"$JACK_ANCHOR\"  GRIP_THETA=\"$GRIP_THETA\"  CONN_RPY=\"$CONN_RPY\""
+  echo "plug splat  : $PLUG_HEAD  tail=$PLUG_TAIL"
+  echo "bg/fixture  : BG_PLY=${BG_PLY:-default}  BG_YAW_DEG=${BG_YAW_DEG:-0}  FIXTURE_PLY=${FIXTURE_PLY:-none}"
+  echo "shadows     : SHADOWS=${SHADOWS:-0}  strength=${SHADOW_STRENGTH:-1.0}  mask_scale=${SHADOW_MASK_SCALE:-0.5}  accum=${SHADOW_ACCUM:-12}"
+  echo "jack jitter : JACK_JITTER_M=${JACK_JITTER_M:-off}  seed=${JACK_JITTER_SEED:-0}  (per-episode value in each ep log)"
 } > "$OUTROOT/_CONFIG.txt"
 cat "$OUTROOT/_CONFIG.txt"
 
-done_n=0; skip_n=0; fail_n=0; consec_fail=0
+done_n=0; skip_n=0; fail_n=0; restart_n=0; consec_fail=0
+
+restart_renderer() {
+    echo "[batch] restarting parallax_sim after $consec_fail consecutive failures"
+    docker exec parallax_sim_fp bash -lc "pkill -9 -f '[d]alus_sim_app'; sleep 3; \
+      rm -f /dev/shm/dal_buffer* /dev/shm/send_dal_buffer* \
+            /dev/shm/sem.dal_sem_buffer* /dev/shm/sem.send_dal_sem_buffer*"
+    docker exec -d parallax_sim_fp bash -lc \
+      'cd /root/parallax/DalusSimCore && python3 dalus_sim_app.py > /tmp/render.log 2>&1'
+    restart_n=$((restart_n + 1))
+    consec_fail=0
+}
+
 for i in $(seq "$START" $((END - 1))); do
     ep=$(printf "ep_%04d" "$i")
     traj=$TRAJROOT/$ep/eef_traj.npy
@@ -114,10 +196,26 @@ for i in $(seq "$START" $((END - 1))); do
     if [ -f "$out/state.npy" ] && grep -q "\[dump\] FULL episode" "$out.log" 2>/dev/null; then
         skip_n=$((skip_n + 1)); continue
     fi
+    # per-episode jack PLACEMENT jitter (image-position DR): re-anchor the whole seat frame
+    # at JACK_POS + delta, delta ~ U(-J,J)^2 on the table plane, deterministic in
+    # (JACK_JITTER_SEED, episode). The splat, replayed trajectory, IK and shadows all move
+    # together (seat-relative pipeline); needs NO renderer restart (jack pose streams per frame).
+    JACK_POS_EP="$JACK_POS"
+    if [ -n "${JACK_JITTER_M:-}" ]; then
+        JACK_POS_EP=$(.venv/bin/python -c "
+import numpy as np
+jx, jy, jz = '$JACK_POS'.split()
+r = np.random.default_rng(${JACK_JITTER_SEED:-0} * 1000003 + $i)
+dx, dy = r.uniform(-$JACK_JITTER_M, $JACK_JITTER_M, 2)
+print(f'{float(jx)+dx:.4f} {float(jy)+dy:.4f} {jz}')")
+        echo "[batch] $ep: jack jitter -> JACK_POS=$JACK_POS_EP"
+    fi
     echo "[batch] rendering $ep -> $out"
     .venv/bin/python scripts/record_sbot_scene_gs_cable.py \
         --eef-traj "$traj" --eef-rpy $EEF_RPY \
-        --jack-pos $JACK_POS --jack-align-rpy $JACK_ALIGN_RPY --conn-rpy $CONN_RPY \
+        --jack-pos $JACK_POS_EP --jack-align-rpy $JACK_ALIGN_RPY --conn-rpy $CONN_RPY \
+        --jack-anchor $JACK_ANCHOR ${JACK_PLY_FLAG:-} ${FIXTURE_FLAG:-} \
+        --grip-theta $GRIP_THETA \
         --connector-ply $PLUG_HEAD --connector-tail-ply $PLUG_TAIL \
         --base-pos $BASE_POS --base-yaw-deg $BASE_YAW_DEG \
         --arm-home-deg $ARM_HOME_DEG \
@@ -126,7 +224,7 @@ for i in $(seq "$START" $((END - 1))); do
         --wrist3-ply $WRIST3_PLY \
         --camera-config /home/pandaliza/parallax/newton-cabling/configs/cameras.yaml \
         --table-ply /home/pandaliza/parallax/gs-sim-vla/scene/assets/objects/table/splat_flat.ply \
-        --bg-ply /home/pandaliza/parallax/gs-sim-vla/scene/assets/background/splat_open.ply \
+        --bg-ply "${BG_PLY:-/home/pandaliza/parallax/gs-sim-vla/scene/assets/background/splat_open.ply}" \
         --wrist-cam --wrist-orbit $WRIST_ORBIT --wrist-side $WRIST_SIDE --wrist-up $WRIST_UP --wrist-back $WRIST_BACK --wrist-aim-back $WRIST_AIM_BACK ${WRIST_USD_FLAG:-} --wrist-rigid \
         --dist-scale $DIST_SCALE --elev $ELEV --azim $AZIM $FRONT_FLAGS $SIDE_FLAGS $RENDER_FLAGS \
         --grasped-only \
@@ -148,13 +246,17 @@ for i in $(seq "$START" $((END - 1))); do
     else
         fail_n=$((fail_n + 1)); consec_fail=$((consec_fail + 1))
         echo "[batch] $ep FAILED (see $out.log)"
-        if [ "$consec_fail" -ge 3 ]; then
-            echo "[batch] ABORT: 3 consecutive failures (dead renderer / broken script?) — fix and rerun to resume"
-            break
+        if [ "$consec_fail" -ge "${RESTART_AFTER_FAILS:-3}" ]; then
+            if [ "${AUTO_RESTART_RENDERER:-1}" = "1" ]; then
+                restart_renderer
+            else
+                echo "[batch] warning: ${consec_fail} consecutive failures; continuing without renderer restart"
+                consec_fail=0
+            fi
         fi
     fi
 done
-echo "[batch] finished: rendered $done_n, skipped $skip_n (already done), failed $fail_n"
+echo "[batch] finished: rendered $done_n, skipped $skip_n (already done), failed $fail_n, renderer restarts $restart_n"
 echo ""
 echo "[batch] next steps:"
 echo "  1. Difix the renders:"
