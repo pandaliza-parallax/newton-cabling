@@ -27,6 +27,14 @@ from newton_cabling.report import (
     outcome_from_dict,
     outcome_to_dict,
 )
+from newton_cabling.scripted_controller import (
+    AlignInsertConfig,
+    AlignInsertController,
+    InsertionObs,
+    InsertPhase,
+    config_for_rigid_cable_env,
+    observe_rigid_cable_env,
+)
 from newton_cabling.timeline import (
     CableTimeline,
     GraspState,
@@ -37,6 +45,8 @@ from newton_cabling.timeline import (
 )
 
 __all__ = [
+    "AlignInsertConfig",
+    "AlignInsertController",
     "CableTimeline",
     "ConnectorSpec",
     "ContactSpec",
@@ -47,14 +57,18 @@ __all__ = [
     "CycleThresholds",
     "ExtractionIncomplete",
     "GraspState",
+    "InsertPhase",
     "InsertionFailed",
+    "InsertionObs",
     "LatchSlipped",
     "LatchSpec",
     "LatchState",
     "Phase",
     "TimelineSample",
     "cad_rj45_connector",
+    "config_for_rigid_cable_env",
     "evaluate_cycle",
+    "observe_rigid_cable_env",
     "outcome_from_dict",
     "outcome_to_dict",
     "proven_cycle_timeline",
