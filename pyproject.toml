@@ -26,6 +26,27 @@ gs = [
     "posix_ipc",
 ]
 
+# PyPI deps of the hardware-calibrated servo plant + command stack (sysid/,
+# control/) that lives in the sibling parallax-demo-newton repo — its ONE home
+# stays parallax-demo-newton/{sysid,control}; this group only covers what that
+# code imports besides numpy. mujoco and scipy are already pulled in transitively
+# by `sim`'s newton[examples], but are listed here too so `servo` is correct
+# standalone (e.g. on a machine without the `sim` extra). ruckig/toppra
+# (control/retime.py's two retiming backends) are not pulled in by anything else.
+#
+# This group does NOT make sysid/control importable by itself — sysid and
+# control are not published packages. After `uv pip install '.[servo]'`, also
+# editable-install the sibling repo (no extras, no deps — its `sim` extra pins a
+# DIFFERENT newton/warp than this repo's, and must never touch this venv's):
+#   uv pip install --python .venv/bin/python --no-deps \
+#       -e ../parallax-demo-newton
+servo = [
+    "mujoco",
+    "scipy",
+    "ruckig",
+    "toppra",
+]
+
 [dependency-groups]
 dev = ["ruff", "ty", "pytest"]
 
