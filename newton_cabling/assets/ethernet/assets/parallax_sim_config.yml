@@ -1,0 +1,62 @@
+schema_version: 0.0.0
+background:
+  name: Ethernet_cable_corrected
+  gaussian_splat: background/splat.ply
+  position:
+  - 0
+  - 0
+  - 0
+  orientation:
+  - 1
+  - 0
+  - 0
+  - 0
+  mesh: background/mesh.usd
+objects:
+- name: Ethernet_cable_corrected
+  gaussian_splat: objects/Ethernet_cable_corrected/splat.ply
+  mesh: objects/Ethernet_cable_corrected/mesh.usd
+  position:
+  - 0
+  - 0
+  - 0
+  orientation:
+  - 1
+  - 0
+  - 0
+  - 0
+  mesh_scale:
+  - 1
+  - 1
+  - 1
+  static: false
+  rigid_physics:
+    material: glass
+    density: 2530.0
+    friction_kinetic: 0.18
+    friction_static: 0.18
+    restitution: 0.97
+    young_modulus: 73.0
+    poisson_ratio: 0.22
+cameras:
+- name: scene_camera
+  position:
+  - 0.327099
+  - 0.156227
+  - 0.051385
+  orientation:
+  - 0.402766
+  - 0.349699
+  - 0.554559
+  - 0.638714
+  camera_axes: usd
+  intrinsics_matrix:
+  - - 2502.192716
+    - 0
+    - 1920
+  - - 0
+    - 1290.193119
+    - 990
+  - - 0
+    - 0
+    - 1
